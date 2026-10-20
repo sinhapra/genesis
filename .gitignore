@@ -1,0 +1,11 @@
+/ufcp
+/ufcp-asan
+/transport-test
+/transport-test-sanitize
+/controller-test
+/controller-test-sanitize
+/session-test
+/session-test-sanitize
+/ufcp-sanitize
+/tests/controller-*.csv
+__pycache__/
