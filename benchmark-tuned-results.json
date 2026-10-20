@@ -1,0 +1,22 @@
+[
+  {
+    "bytes": 4194304,
+    "added_rtt_ms": 200.0,
+    "window": 32,
+    "receive_chunks": 64,
+    "seconds": 29.131,
+    "MiB_s": 0.137,
+    "sha256_match": true,
+    "sender": "Complete: 4194304 bytes acknowledged and finalized\nController: bbr-inspired mode=probe-bw bandwidth=162643B/s pacing=130115B/s cwnd=32768 min-rtt=200080us lost=0B"
+  },
+  {
+    "bytes": 4194304,
+    "added_rtt_ms": 200.0,
+    "window": 256,
+    "receive_chunks": 256,
+    "seconds": 5.244,
+    "MiB_s": 0.763,
+    "sha256_match": true,
+    "sender": "Complete: 4194304 bytes acknowledged and finalized\nController: bbr-inspired mode=startup bandwidth=1307438B/s pacing=2614876B/s cwnd=262144 min-rtt=199263us lost=0B"
+  }
+]

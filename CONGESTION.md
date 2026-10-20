@@ -64,8 +64,9 @@ floor is unsuitable for paths below 16 KiB/s without further tuning/validation.
 
 Loss does not abort an ongoing RTT probe. The controller's minimum RTT includes
 receiver ACK scheduling and any unavoidable host scheduling time. Transport RTO
-retains at least one millisecond of timer granularity above smoothed RTT to avoid
-perpetual false timeout at stable RTTs. Explicit transport probes remain backed
+starts at one second before RTT is known. After feedback, it retains at least
+25 ms of headroom above smoothed RTT for bounded ACK delay and host scheduling
+jitter. This reduces false timeout losses; genuine loss recovery can take longer. Explicit transport probes remain backed
 off control packets; DATA originals and retransmissions share controller budgets.
 
 ## CLI and validation

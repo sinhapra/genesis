@@ -104,8 +104,9 @@ Independent sampler traces validate send/ACK snapshots, compressed ACK bursts,
 application/flow-limited propagation, late redundant ACKs, duplicate loss/ACK
 events, bounded history and idle epochs. State traces check startup plateau,
 drain, bandwidth probing, upward RTT refresh, loss response, limited samples,
-feedback silence and idle restart. A transport regression maintains at least
-1 ms RTO headroom after 100 identical 80 ms RTT samples.
+feedback silence and idle restart. Transport regressions maintain at least
+25 ms RTO headroom after 100 identical 80 ms RTT samples, accept a subsequent
+100 ms ACK without timeout loss, and avoid initial false loss at 205 ms RTT.
 
 The deterministic simulator runs the actual transport and controller over a
 finite bottleneck queue. Payload capacity is 480,000 B/s, with a drop to
@@ -145,3 +146,30 @@ comparison, not a cross-machine throughput target or Internet fairness result.
 Two-host testing, network namespaces, competing flows, path MTU discovery,
 real-network controller/security validation remain later milestones. SSH and
 authentication are now implemented and covered by the session tests above.
+
+
+## Timeout performance experiment (2026-10-20)
+
+WSL loopback legacy UDP transfers through the Python relay, adding 100 ms each
+way. One run per configuration, 4 MiB payload, BBR-inspired control explicitly
+enabled. Sender time includes setup/final confirmation, excludes receiver linger.
+Every output passed SHA-256 verification. No relay packet drops were configured.
+
+| Sender window / receiver chunks | Before | After timeout change | After goodput | Declared loss before / after |
+| --- | --- | --- | --- | --- |
+| 32 / 64 | 49.592 s | 29.131 s | 0.137 MiB/s | 10,240 / 0 bytes |
+| 256 / 256 | 37.254 s | 5.244 s | 0.763 MiB/s | 9,216 / 0 bytes |
+
+The initial RTO changes from 200 ms to 1 second. Minimum smoothed-RTT headroom
+changes from 1 ms to 25 ms; the variance-based extension and two-second maximum
+remain. The initial timeout no longer collides with the configured 200 ms RTT.
+The larger-window run is 7.10 times faster than its previous configuration.
+The final adaptive window reaches 256 KiB rather than approximately 28 KiB.
+These single-run measurements show improvement in this controlled delay test,
+not a cross-host throughput guarantee. Longer timeout headroom trades slower
+true-loss recovery for fewer spurious loss declarations. Existing impairment
+and deterministic controller tests must remain passing.
+
+Raw measurements: `benchmark-results.json` and `benchmark-tuned-results.json`.
+Reproduce the updated delayed test with `python3 benchmark-tuned.py` in Linux
+from the project root after `make ufcp`.

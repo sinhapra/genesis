@@ -61,7 +61,7 @@ class Sender {
     std::vector<Event> events_;
     Budget budget_;
     Time next_send_ = 0, progress_ = 0, probe_at_ = 200000, probe_backoff_ = 200000;
-    Time rto_ = 200000, last_now_ = 0;
+    Time rto_ = 1000000, last_now_ = 0;
     double srtt_ = 0, variance_ = 0;
     bool reliable_link_ = false;
     void clock(Time now) {
@@ -265,9 +265,9 @@ class Sender {
                         variance_ = .75 * variance_ + .25 * std::abs(srtt_ - sample);
                         srtt_ = .875 * srtt_ + .125 * sample;
                     }
-                    // Requirement: retain timer granularity headroom so stable RTTs do not cause perpetual false loss.
-                    rto_ = Time(
-                        std::clamp(srtt_ + std::max(1000.0, 4 * variance_), 50000.0, 2000000.0));
+                    // Requirement: allow bounded ACK delay and scheduling jitter before declaring timeout loss.
+                    rto_ = Time(std::clamp(srtt_ + std::max(double(MAX_ACK_DELAY), 4 * variance_),
+                                           50000.0, 2000000.0));
                 }
                 event({Event::Acknowledged, it->first, attempt.offset, attempt.bytes, attempt.sent,
                        now, unique});

@@ -1,0 +1,42 @@
+[
+  {
+    "bytes": 524288000,
+    "added_rtt_ms": 0,
+    "window": 32,
+    "receive_chunks": 64,
+    "seconds": 85.515,
+    "MiB_s": 5.847,
+    "sha256_match": true,
+    "sender": "Complete: 524288000 bytes acknowledged and finalized\nController: bbr-inspired mode=probe-bw bandwidth=9394495B/s pacing=9394495B/s cwnd=10240 min-rtt=91us lost=0B"
+  },
+  {
+    "bytes": 524288000,
+    "added_rtt_ms": 0,
+    "window": 256,
+    "receive_chunks": 256,
+    "seconds": 88.882,
+    "MiB_s": 5.625,
+    "sha256_match": true,
+    "sender": "Complete: 524288000 bytes acknowledged and finalized\nController: bbr-inspired mode=probe-bw bandwidth=9225225B/s pacing=9225225B/s cwnd=10240 min-rtt=95us lost=0B"
+  },
+  {
+    "bytes": 4194304,
+    "added_rtt_ms": 200.0,
+    "window": 32,
+    "receive_chunks": 64,
+    "seconds": 49.592,
+    "MiB_s": 0.081,
+    "sha256_match": true,
+    "sender": "Complete: 4194304 bytes acknowledged and finalized\nController: bbr-inspired mode=probe-bw bandwidth=132146B/s pacing=132146B/s cwnd=29670 min-rtt=200375us lost=10240B"
+  },
+  {
+    "bytes": 4194304,
+    "added_rtt_ms": 200.0,
+    "window": 256,
+    "receive_chunks": 256,
+    "seconds": 37.254,
+    "MiB_s": 0.107,
+    "sha256_match": true,
+    "sender": "Complete: 4194304 bytes acknowledged and finalized\nController: bbr-inspired mode=probe-bw bandwidth=131077B/s pacing=131077B/s cwnd=27852 min-rtt=200086us lost=9216B"
+  }
+]

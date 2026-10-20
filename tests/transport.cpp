@@ -26,15 +26,15 @@ void accounting() {
     Transmission original, retry;
     check(sender.next(0, original));
     check(sender.flight_bytes() == PAYLOAD);
-    check(!sender.next(199999, retry));
-    check(sender.next(200000, retry));
+    check(!sender.next(999999, retry));
+    check(sender.next(1000000, retry));
     check(original.number != retry.number && original.offset == retry.offset);
     check(sender.flight_bytes() == PAYLOAD);
-    check(sender.acknowledge({PAYLOAD, 0, {{original.number, original.number}}}, 201000));
+    check(sender.acknowledge({PAYLOAD, 0, {{original.number, original.number}}}, 1001000));
     check(sender.complete() && sender.delivered() == PAYLOAD && sender.flight_bytes() == PAYLOAD);
-    check(sender.acknowledge({PAYLOAD, 0, {{original.number, original.number}}}, 202000));
+    check(sender.acknowledge({PAYLOAD, 0, {{original.number, original.number}}}, 1002000));
     check(sender.flight_bytes() == PAYLOAD && sender.delivered() == PAYLOAD);
-    check(sender.acknowledge({PAYLOAD, 0, {{retry.number, retry.number}}}, 203000));
+    check(sender.acknowledge({PAYLOAD, 0, {{retry.number, retry.number}}}, 1003000));
     check(!sender.flight_bytes() && sender.delivered() == PAYLOAD);
     unsigned delivered = 0, losses = 0;
     for (auto event : sender.events()) {
@@ -188,7 +188,23 @@ void zero_credit_and_timers() {
         stable.events();
         clock += 81000;
     }
-    check(stable.rto() >= 81000);
+    check(stable.rto() >= 80000 + MAX_ACK_DELAY);
+    stable.queue(bytes());
+    check(stable.next(clock, packet));
+    stable.events();
+    stable.tick(clock + 100000);
+    check(stable.events().empty() && stable.flight_bytes() == PAYLOAD);
+    check(stable.acknowledge({200 * PAYLOAD, 0, {{packet.number, packet.number}}},
+                             clock + 100000));
+    for (auto event : stable.events())
+        check(event.kind != Event::Lost);
+    Sender initial(PAYLOAD, PAYLOAD);
+    initial.queue(bytes());
+    check(initial.next(0, packet));
+    initial.events();
+    initial.tick(205000);
+    check(initial.events().empty() && initial.flight_bytes() == PAYLOAD);
+    check(initial.acknowledge({PAYLOAD, 0, {{packet.number, packet.number}}}, 205000));
     Sender tunnel(PAYLOAD, PAYLOAD);
     tunnel.reliable_link(true);
     tunnel.budget({PAYLOAD, 0});
