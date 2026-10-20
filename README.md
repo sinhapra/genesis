@@ -63,6 +63,11 @@ requires an IPv4 address; `--udp-address` can override it.
 
 ## Reading the code
 
+C++ formatting uses the checked-in `.clang-format` (LLVM style, four-space
+indentation, attached braces and a 100-column target). To reproduce it with
+clang-format 18.1.8, run `clang-format -i src/*.hpp src/*.cpp tests/*.cpp`.
+Comments remain on a single line.
+
 Start with `main` in `src/ufcp.cpp`, then follow `remote_copy` and `remote_helper`
 in `src/remote.hpp`. Both commands share transfer defaults and the same temporary
 output lifecycle. The remaining files each own one part of the transfer:
