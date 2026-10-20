@@ -1,6 +1,7 @@
 #pragma once
 #include "wire.hpp"
 #include <chrono>
+#include <iostream>
 #include <array>
 #include <deque>
 #include <string>
@@ -18,6 +19,16 @@ inline Time session_now() {
     return std::chrono::duration_cast<std::chrono::microseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
+}
+inline bool debug_enabled = false;
+inline void diagnostic(const std::string& message) {
+    if (debug_enabled)
+        std::cerr << "ufcp-debug pid=" << getpid() << " monotonic-us=" << session_now()
+                  << " " << message << '\n';
+}
+inline void child_status(int status) {
+    diagnostic(WIFEXITED(status) ? "SSH exit code=" + std::to_string(WEXITSTATUS(status))
+                               : "SSH terminated signal=" + std::to_string(WTERMSIG(status)));
 }
 struct ScopedFd {
     int fd;
@@ -85,6 +96,8 @@ class FrameChannel {
             auto n = write(output_, frame.data() + written_, frame.size() - written_);
             if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
                 return;
+            if (n <= 0)
+                diagnostic("SSH write failed errno=" + std::to_string(errno) + " " + strerror(errno));
             require(n > 0, "SSH channel closed while writing");
             written_ += size_t(n);
             output_bytes_ -= size_t(n);
@@ -118,6 +131,9 @@ class FrameChannel {
             auto n = read(input_, buffer.data(), buffer.size() - input_bytes_.size());
             if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
                 return false;
+            if (n <= 0)
+                diagnostic("SSH read " + std::string(n == 0 ? "EOF" : strerror(errno)) +
+                           " buffered-bytes=" + std::to_string(input_bytes_.size()));
             require(n > 0, "SSH channel closed before session completion");
             input_bytes_.insert(input_bytes_.end(), buffer.begin(), buffer.begin() + n);
         }
@@ -131,11 +147,13 @@ class FrameChannel {
         require(result >= 0 || errno == EINTR, "session poll failed");
     }
     Frame expect(Control type, Time timeout = 15000000) {
+        diagnostic("waiting for SSH control type=" + std::to_string(unsigned(type)));
         Time deadline = session_now() + timeout;
         while (session_now() < deadline) {
             flush();
             Frame frame;
             if (next(frame)) {
+                diagnostic("received SSH control type=" + std::to_string(unsigned(frame.type)));
                 require(frame.type == type, "unexpected SSH control message");
                 return frame;
             }
@@ -188,12 +206,15 @@ class SshProcess {
                                            "-o",    "ConnectTimeout=10",
                                            "-o",    "ServerAliveInterval=5",
                                            "-o",    "ServerAliveCountMax=3"};
+        if (debug_enabled)
+            arguments.push_back("-v");
+        diagnostic("starting SSH host=" + host + " remote-program=" + remote_program);
         if (!config.empty()) {
             arguments.push_back("-F");
             arguments.push_back(config);
         }
         arguments.push_back(host);
-        arguments.push_back(shell_quote(remote_program) + " --helper");
+        arguments.push_back(shell_quote(remote_program) + " --helper" + (debug_enabled ? " --debug" : ""));
         std::vector<char*> argv;
         for (auto& argument : arguments)
             argv.push_back(&argument[0]);
@@ -221,6 +242,7 @@ class SshProcess {
             pid_t result = waitpid(pid_, &status, WNOHANG);
             if (result == pid_) {
                 pid_ = -1;
+                child_status(status);
                 require(WIFEXITED(status) && WEXITSTATUS(status) == 0,
                         "SSH helper failed after confirmed completion");
                 return;
@@ -236,19 +258,26 @@ class SshProcess {
         if (pid_ > 0) {
             int status = 0;
             for (unsigned i = 0; i < 100; ++i) {
-                if (waitpid(pid_, &status, WNOHANG) == pid_)
+                if (waitpid(pid_, &status, WNOHANG) == pid_) {
+                    child_status(status);
                     return;
+                }
                 usleep(1000);
             }
+            diagnostic("cleanup: terminating SSH client after closing channel");
             kill(pid_, SIGTERM);
             for (unsigned i = 0; i < 100; ++i) {
-                if (waitpid(pid_, &status, WNOHANG) == pid_)
+                if (waitpid(pid_, &status, WNOHANG) == pid_) {
+                    child_status(status);
                     return;
+                }
                 usleep(1000);
             }
+            diagnostic("cleanup: killing unresponsive SSH client");
             kill(pid_, SIGKILL);
             while (waitpid(pid_, &status, 0) < 0 && errno == EINTR) {
             }
+            child_status(status);
         }
     }
 };

@@ -18,6 +18,11 @@ struct RemoteOptions : TransferOptions {
     RemoteMode mode = RemoteMode::Auto;
     std::string ssh_program = "ssh", remote_program = "ufcp", ssh_config, udp_address;
 };
+inline std::string endpoint(const sockaddr_in& peer) {
+    char text[INET_ADDRSTRLEN]{};
+    inet_ntop(AF_INET, &peer.sin_addr, text, sizeof(text));
+    return std::string(text) + ":" + std::to_string(ntohs(peer.sin_port));
+}
 inline int udp_socket() {
     int fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0)
@@ -113,6 +118,7 @@ inline Bytes completion(uint64_t total, const Bytes& hash) {
 }
 // Requirement: the SSH helper receives remote paths as framed data and never inserts them into shell commands.
 inline void remote_helper(FrameChannel& channel) {
+    diagnostic("helper waiting for INIT");
     auto init = channel.expect(Control::Init, 30000000).bytes;
     require(init.size() >= 94 && get(init, 0, 4) == 0x55465331 && init[20] <= 2,
             "incompatible SSH session setup");
@@ -128,6 +134,8 @@ inline void remote_helper(FrameChannel& channel) {
     PacketCipher incoming(Bytes(init.begin() + 27, init.begin() + 59)),
         outgoing(Bytes(init.begin() + 59, init.begin() + 91));
     OPENSSL_cleanse(init.data() + 27, 64);
+    diagnostic("helper INIT validated bytes=" + std::to_string(total) +
+               " window=" + std::to_string(window) + " receive-chunks=" + std::to_string(capacity));
     OutputFile file(destination);
     FileWriter writer(file.fd(), delay);
     Receiver receiver(total, capacity);
@@ -135,6 +143,7 @@ inline void remote_helper(FrameChannel& channel) {
     Bytes ready(10);
     put(ready, 0, receiver.limit(), 8);
     put(ready, 8, udp.fd >= 0 ? udp_port(udp.fd) : 0, 2);
+    diagnostic("helper READY UDP port=" + std::to_string(get(ready, 8, 2)));
     channel.send(Control::Ready, ready);
     bool selected = false, direct = false, peer_known = false, closed = false, published = false;
     sockaddr_in peer{};
@@ -176,6 +185,7 @@ inline void remote_helper(FrameChannel& channel) {
                     close(udp.fd);
                     udp.fd = -1;
                 }
+                diagnostic(direct ? "helper selected direct UDP" : "helper selected SSH/TCP");
                 selected = true;
                 channel.send(Control::Selected, frame.bytes);
             } else if (frame.type == Control::Packet && selected && !direct && !published) {
@@ -196,12 +206,20 @@ inline void remote_helper(FrameChannel& channel) {
         }
         Bytes sealed, plain;
         sockaddr_in from{};
-        if (!published && raw_receive(udp.fd, sealed, from) && incoming.open(sealed, plain)) {
+        bool received = !published && raw_receive(udp.fd, sealed, from);
+        bool authenticated = received && incoming.open(sealed, plain);
+        if (received && !selected)
+            diagnostic("helper UDP probe received from=" + endpoint(from) +
+                       " bytes=" + std::to_string(sealed.size()) +
+                       " authenticated=" + std::to_string(authenticated));
+        if (authenticated) {
             now = session_now();
             if (plain[0] == 1 && plain.size() == PacketCipher::MAX_PLAIN && !selected) {
                 peer = from;
                 peer_known = true;
-                raw_send(udp.fd, peer, outgoing.seal(plain), true);
+                bool replied = raw_send(udp.fd, peer, outgoing.seal(plain), true);
+                diagnostic("helper probe reply sent=" + std::to_string(replied) +
+                           " peer=" + endpoint(peer));
                 deadline = now + 15000000;
             } else if (selected && direct && same_peer(peer, from) && plain[0] == 2) {
                 Bytes bytes(plain.begin() + 1, plain.end());
@@ -238,6 +256,9 @@ inline void remote_helper(FrameChannel& channel) {
 // Requirement: select direct authenticated UDP when available and explicitly use SSH/TCP otherwise.
 inline void remote_copy(const std::string& source, const std::string& target,
                         const RemoteOptions& options) {
+    diagnostic("role=sender startup mode=" + std::to_string(unsigned(options.mode)) +
+               " window=" + std::to_string(options.window) +
+               " receive-chunks=" + std::to_string(options.receive_chunks));
     size_t colon = target.find(':');
     require(colon != std::string::npos && colon && colon + 1 < target.size(),
             "remote target must be [user@]host:path");
@@ -253,6 +274,7 @@ inline void remote_copy(const std::string& source, const std::string& target,
     Bytes keys = random_bytes(64);
     PacketCipher outgoing(Bytes(keys.begin(), keys.begin() + 32)),
         incoming(Bytes(keys.begin() + 32, keys.end()));
+    diagnostic("sender source bytes=" + std::to_string(total));
     SshProcess ssh(host, options.ssh_program, options.remote_program, options.ssh_config);
     FrameChannel channel(ssh.fd(), ssh.fd());
     Bytes init(93 + destination.size());
@@ -266,12 +288,15 @@ inline void remote_copy(const std::string& source, const std::string& target,
     std::copy(keys.begin(), keys.end(), init.begin() + 27);
     put(init, 91, destination.size(), 2);
     std::copy(destination.begin(), destination.end(), init.begin() + 93);
+    diagnostic("sender sending INIT; waiting for remote helper READY");
     channel.send(Control::Init, init);
     OPENSSL_cleanse(keys.data(), keys.size());
     OPENSSL_cleanse(init.data() + 27, 64);
     auto ready = channel.expect(Control::Ready, 30000000).bytes;
     require(ready.size() == 10 && get(ready, 0, 8) <= total, "invalid remote ready response");
+    diagnostic("sender READY received remote UDP port=" + std::to_string(get(ready, 8, 2)));
     ScopedFd udp(options.mode == RemoteMode::Ssh ? -1 : udp_socket());
+    diagnostic("sender local UDP port=" + std::to_string(udp.fd >= 0 ? udp_port(udp.fd) : 0));
     sockaddr_in peer{};
     bool direct = false;
     if (options.mode != RemoteMode::Ssh && udp.fd >= 0 && get(ready, 8, 2)) {
@@ -279,7 +304,10 @@ inline void remote_copy(const std::string& source, const std::string& target,
             options.udp_address.empty()
                 ? host.substr(host.find('@') == std::string::npos ? 0 : host.find('@') + 1)
                 : options.udp_address;
-        if (resolve_udp(hostname, uint16_t(get(ready, 8, 2)), peer)) {
+        bool resolved = resolve_udp(hostname, uint16_t(get(ready, 8, 2)), peer);
+        diagnostic("sender resolve host=" + hostname + " success=" + std::to_string(resolved));
+        if (resolved) {
+            diagnostic("sender probing remote UDP endpoint=" + endpoint(peer));
             // Requirement: bidirectional probes test full-sized encrypted datagrams before choosing native UDP.
             Bytes challenge(PacketCipher::MAX_PLAIN - 1);
             auto nonce = random_bytes(16);
@@ -288,15 +316,23 @@ inline void remote_copy(const std::string& source, const std::string& target,
             while (session_now() < until && !direct) {
                 auto now = session_now();
                 if (now >= next) {
-                    raw_send(udp.fd, peer, encrypted_record(outgoing, 1, challenge), true);
+                    bool sent = raw_send(udp.fd, peer, encrypted_record(outgoing, 1, challenge), true);
+                    diagnostic("sender UDP probe sent=" + std::to_string(sent));
                     next = now + 200000;
                 }
                 Bytes sealed, plain;
                 sockaddr_in from{};
-                if (raw_receive(udp.fd, sealed, from) && same_peer(peer, from) &&
-                    incoming.open(sealed, plain) && plain.size() == PacketCipher::MAX_PLAIN &&
-                    plain[0] == 1 && Bytes(plain.begin() + 1, plain.end()) == challenge)
-                    direct = true;
+                if (raw_receive(udp.fd, sealed, from)) {
+                    bool expected_peer = same_peer(peer, from);
+                    bool authenticated = expected_peer && incoming.open(sealed, plain);
+                    direct = authenticated && plain.size() == PacketCipher::MAX_PLAIN &&
+                             plain[0] == 1 && Bytes(plain.begin() + 1, plain.end()) == challenge;
+                    diagnostic("sender UDP probe reply from=" + endpoint(from) +
+                               " bytes=" + std::to_string(sealed.size()) +
+                               " expected-peer=" + std::to_string(expected_peer) +
+                               " authenticated=" + std::to_string(authenticated) +
+                               " challenge-matched=" + std::to_string(direct));
+                }
                 Frame unexpected;
                 require(!channel.next(unexpected), "unexpected control message during UDP probe");
                 if (!direct)
@@ -304,6 +340,7 @@ inline void remote_copy(const std::string& source, const std::string& target,
             }
         }
     }
+    diagnostic("sender UDP negotiation complete reachable=" + std::to_string(direct));
     require(direct || options.mode != RemoteMode::Udp,
             "authenticated UDP path unavailable; strict UDP mode forbids SSH/TCP fallback");
     // Agree on one transport before payload starts; a later UDP failure does not switch modes.
@@ -425,6 +462,7 @@ inline int helper_main() {
             channel.finish_writes(200000);
         } catch (...) {
         }
+        diagnostic("helper failed: " + std::string(error.what()));
         std::cerr << "ufcp helper: " << error.what() << '\n';
         return 1;
     }

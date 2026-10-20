@@ -238,8 +238,13 @@ void receiver(const char* ip, const char* port, const char* path, const Transfer
 int main(int argc, char** argv) {
     try {
         signal(SIGPIPE, SIG_IGN);
-        if (argc == 2 && std::string(argv[1]) == "--helper")
+        if (argc >= 2 && std::string(argv[1]) == "--helper") {
+            require(argc == 2 || (argc == 3 && std::string(argv[2]) == "--debug"),
+                    "invalid helper arguments");
+            debug_enabled = argc == 3;
+            diagnostic("role=helper startup");
             return helper_main();
+        }
         bool copy = argc >= 2 && std::string(argv[1]) == "copy";
         int option_start = copy ? 4 : 5;
         require(argc >= option_start, copy ? "usage: ufcp copy SOURCE [user@]HOST:DEST [OPTIONS]"
@@ -249,6 +254,10 @@ int main(int argc, char** argv) {
         bool pace_set = false;
         for (int i = option_start; i < argc; ++i) {
             std::string option(argv[i]);
+            if (copy && option == "--debug") {
+                debug_enabled = true;
+                continue;
+            }
             auto equal = option.find('=');
             require(equal != std::string::npos, "options require =VALUE");
             auto key = option.substr(0, equal), value = option.substr(equal + 1);
@@ -299,6 +308,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("mode must be send or recv");
         return 0;
     } catch (const std::exception& e) {
+        diagnostic("copy/command failed: " + std::string(e.what()));
         std::cerr << "ufcp: " << e.what() << '\n';
         return 1;
     }

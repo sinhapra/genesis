@@ -1,4 +1,4 @@
-﻿# ufcp: UDP transfer with SSH/TCP fallback
+# ufcp: UDP transfer with SSH/TCP fallback
 
 Remote copy authenticates through SSH, uses encrypted direct UDP with our
 userspace BBR-inspired controller when reachable, and falls back to SSH/TCP.
@@ -29,6 +29,7 @@ must not exist and its filesystem must support same-directory hard links.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--transport=auto\|udp\|ssh` | auto | Copy transport policy |
+| `--debug` | off | Copy diagnostics and SSH verbose output, including remote helper stderr |
 | `--cc=bbr-inspired\|fixed` | bbr-inspired | Userspace direct-UDP controller or test baseline |
 | `--window=N` | 32 chunks | Maximum sending window, 1-256 |
 | `--receive-chunks=N` | 64 chunks | Receiver capacity, 1-256 |
@@ -118,3 +119,29 @@ automatic mid-transfer failover and production system validation remain. Output
 publication is not power-loss durable. Normal failures remove incomplete `.part`;
 crashes may leave it, and it is never silently reused. Kernel filesystem I/O may
 delay worker shutdown. SHA-256 and metadata checks do not replace source snapshots.
+
+
+## Collecting a strict-UDP failure log
+
+Build matching updated ufcp binaries on both hosts (`make -B ufcp`). On the
+sending host, run the collector from the directory containing the input file:
+
+```sh
+bash /path/to/genesis/scripts/collect-ufcp-debug.sh pi-500m.txt \
+  lihao@song:test/pi-500m.debug-$(date +%Y%m%d-%H%M%S).ufcp \
+  /absolute/path/on/song/to/genesis/ufcp
+```
+
+The third argument selects Song's rebuilt binary; omit it to use `ufcp` on the
+remote PATH. The collector prints and saves one `ufcp-debug-*.log` in the current
+directory and preserves ufcp's exit status. Send that file to the maintainer.
+It records local revision/binary hash, source size, the command, verbose SSH,
+helper startup, setup stages, UDP ports and resolved endpoints, probe send/receive
+and authentication results, and SSH exit status or cleanup termination. Numeric
+control types refer to `Control` in `src/session_io.hpp`. Full-size probe attempts
+run for 1.2 seconds. An SSH EOF after strict-UDP probe failure can be helper cleanup
+caused by the sender aborting; use timestamps and earlier probe messages to find
+the first failure. A cleanup-triggered SSH termination is labeled separately.
+Debug logs contain hostnames, usernames, addresses, and paths; they do not dump
+session keys, challenge values, control payloads, or file contents. Diagnostic
+output uses stderr, leaving the helper's binary stdout protocol intact.

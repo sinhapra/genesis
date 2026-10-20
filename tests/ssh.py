@@ -70,6 +70,9 @@ LogLevel ERROR
         options = ['--ssh-config=' + str(root / 'config'), '--remote-program=' + binary]
         for name, extra, expected in [('tunnel', ['--transport=ssh'], 'SSH/TCP'),
                                       ('auto-direct', ['--udp-address=127.0.0.1'], 'direct UDP'),
+                                      ('strict-udp-debug', ['--debug', '--transport=udp', '--udp-address=127.0.0.1'], 'direct UDP'),
+                                      ('strict-udp-window256', ['--transport=udp', '--udp-address=127.0.0.1',
+                                                                '--window=256', '--receive-chunks=256'], 'direct UDP'),
                                       ('auto-fallback', ['--udp-address=127.0.0.2'], 'SSH/TCP')]:
             target = root / (name + " ' ; $(printf ignored)")
             result = run(base + ['ufcp-fixture:' + str(target)] + options + extra)
@@ -77,6 +80,34 @@ LogLevel ERROR
             assert 'Transport: ' + expected in result.stdout and target.read_bytes() == source.read_bytes()
             assert not pathlib.Path(str(target) + '.part').exists()
             print('PASS real OpenSSH', name, flush=True)
+            if name.startswith('strict-udp'):
+                assert 'Controller: bbr-inspired' in result.stdout
+                if '--debug' in extra:
+                    for marker in ('role=sender startup', 'role=helper startup',
+                                   'helper READY UDP port=', 'challenge-matched=1',
+                                   'SSH exit code=0'):
+                        assert marker in result.stderr, (marker, result.stderr)
+                else:
+                    assert 'ufcp-debug' not in result.stderr, result.stderr
+                print(result.stdout.strip(), flush=True)
+        target = root / 'strict-unavailable'
+        result = run(base + ['ufcp-fixture:' + str(target)] + options +
+                     ['--debug', '--transport=udp', '--udp-address=127.0.0.2'])
+        assert result.returncode != 0 and not target.exists()
+        assert 'strict UDP mode forbids' in result.stderr, result.stderr
+        assert 'sender UDP negotiation complete reachable=0' in result.stderr
+        assert 'helper READY UDP port=' in result.stderr
+        assert 'SSH exit code=' in result.stderr or 'cleanup: terminating SSH' in result.stderr
+        assert not pathlib.Path(str(target) + '.part').exists()
+        print('PASS real OpenSSH strict UDP rejects unavailable path without fallback', flush=True)
+        result = run(base + ['ufcp-fixture:' + str(root / 'missing-helper.out'),
+                             '--ssh-config=' + str(root / 'config'),
+                             '--remote-program=' + str(root / 'missing-helper'),
+                             '--transport=udp', '--debug'])
+        assert result.returncode != 0
+        assert 'SSH exit code=127' in result.stderr, result.stderr
+        assert 'waiting for remote helper READY' in result.stderr
+        print('PASS real SSH missing helper diagnostic exit=127', flush=True)
         helper_path = root / "helper ' with spaces"
         helper_path.symlink_to(binary)
         target = root / 'quoted-program.out'
