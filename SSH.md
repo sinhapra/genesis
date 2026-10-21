@@ -66,14 +66,27 @@ PACKET=5, FINISH=6, COMPLETE=7, ERROR=8, CLOSE=9. Parsing supports fragmentation
 and coalescing; output is bounded to 128 KiB plus one partially written frame,
 with control-space reservation.
 
-INIT payload fields: UFS1 magic (4), stream size (8), session ID (8), requested
+INIT payload fields: UFS2 magic (4), stream size (8), session ID (8), requested
 mode (1; auto=0/udp=1/ssh=2), window chunks (2), receive chunks (2), worker delay
-ms (2), independent directional keys (64), destination length (2), destination
-bytes (1-4,096; NUL forbidden). Limits are validated before file creation.
+ms (2), independent directional keys (64), destination length (2), sender UDP
+port (2; zero when unavailable), destination bytes (1-4,096; NUL forbidden).
+Helpers reject other magic values, so both hosts must run matching builds. Limits are validated before file creation.
 READY contains initial absolute receive limit (8) and UDP port (2; zero when
 unavailable). SELECT/SELECTED contain selected udp=1 or ssh=2. PACKET contains a
 validated UFC3 DATA or ACK record. FINISH/COMPLETE contain stream size (8) and
 SHA-256 (32). ERROR contains a bounded reason; CLOSE has no payload.
+
+Before the sender probes, the helper punches: every 100 ms until SELECT it sends
+an encrypted punch record to the sender UDP port at the client address that
+sshd reports in SSH_CONNECTION (the sender's public address when it is behind
+NAT). Because the helper sends first, stateful firewalls and NAT routers on the
+helper side treat the sender's probes as replies, so no inbound firewall rule,
+port forward or adapter change is needed. This works when both sides may send
+outbound UDP and NAT keeps the sender's port (as ufw, firewalld, Windows
+Firewall, Linux masquerade and most home routers do). It cannot traverse networks
+that block outbound UDP, port-randomizing (symmetric) NAT on both sides, or SSH
+through a jump host, where SSH_CONNECTION names the jump host; auto mode then
+uses SSH/TCP. Without an IPv4 SSH_CONNECTION the helper does not punch.
 
 The sender tries six encrypted probes, 200 ms apart over 1.2 seconds. A fresh
 16-byte challenge is padded to match maximum DATA datagram size. The helper
@@ -92,7 +105,8 @@ ciphertext, tag (16). The header is authenticated additional data. Nonce is
 four zero bytes followed by counter (8); distinct keys separate directions and
 fresh session keys prevent cross-session nonce reuse. Exhaustion fails safely.
 
-Plaintext starts with kind: probe=1 or UFC3 packet=2. Maximum plaintext is 1,063
+Plaintext starts with kind: probe=1, UFC3 packet=2 or punch=3 (no body; the
+sender ignores it). Maximum plaintext is 1,063
 bytes; maximum encrypted datagram is 1,091. A 1,024-counter replay window permits
 reordering. Invalid tags never advance the window. Wrong keys, wrong sessions,
 wrong peers, malformed packets, stale counters and replays are rejected. Very
@@ -132,6 +146,13 @@ direct/tunnel/fallback transfer, encrypted loss/corruption/replay recovery, spec
 paths, empty files, slow queues, strict UDP failure, no-overwrite, malformed
 control, bad digest, disconnect cleanup and lost final confirmation. Local exec
 fixtures validate protocol plumbing, not SSH authentication.
+
+make netns-test runs sender and helper in separate unprivileged network
+namespaces on different subnets joined by a router namespace. It checks strict
+UDP through stateful firewalls on either or both hosts, a sender behind NAT,
+auto-mode fallback and strict failure when UDP is fully blocked. It needs user
+namespaces, iproute2, iptables and nsenter, skips otherwise, and changes nothing
+outside its namespaces.
 
 make ssh-test additionally launches an unprivileged loopback OpenSSH server with
 temporary keys/configuration, testing direct/tunnel/fallback, quoted helper paths,

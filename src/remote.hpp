@@ -86,6 +86,16 @@ inline bool resolve_udp(const std::string& host, uint16_t port, sockaddr_in& pee
     peer.sin_port = htons(port);
     return true;
 }
+inline bool sender_address(sockaddr_in& peer) {
+    const char* connection = getenv("SSH_CONNECTION");
+    if (!connection)
+        return false;
+    std::string client(connection);
+    client = client.substr(0, client.find(' '));
+    peer = {};
+    peer.sin_family = AF_INET;
+    return inet_pton(AF_INET, client.c_str(), &peer.sin_addr) == 1;
+}
 inline Bytes encrypted_record(PacketCipher& cipher, uint8_t kind, const Bytes& bytes) {
     Bytes plain(1 + bytes.size());
     plain[0] = kind;
@@ -120,16 +130,17 @@ inline Bytes completion(uint64_t total, const Bytes& hash) {
 inline void remote_helper(FrameChannel& channel) {
     diagnostic("helper waiting for INIT");
     auto init = channel.expect(Control::Init, 30000000).bytes;
-    require(init.size() >= 94 && get(init, 0, 4) == 0x55465331 && init[20] <= 2,
+    require(init.size() >= 96 && get(init, 0, 4) == 0x55465332 && init[20] <= 2,
             "incompatible SSH session setup");
     uint64_t total = get(init, 4, 8), session = get(init, 12, 8);
     size_t window = size_t(get(init, 21, 2)), capacity = size_t(get(init, 23, 2));
     unsigned delay = unsigned(get(init, 25, 2));
     size_t path_length = size_t(get(init, 91, 2));
     require(window && window <= MAX_CHUNKS && capacity && capacity <= MAX_CHUNKS && delay <= 1000 &&
-                path_length && path_length <= 4096 && init.size() == 93 + path_length,
+                path_length && path_length <= 4096 && init.size() == 95 + path_length,
             "invalid SSH session limits");
-    std::string destination(init.begin() + 93, init.end());
+    uint16_t sender_port = uint16_t(get(init, 93, 2));
+    std::string destination(init.begin() + 95, init.end());
     require(destination.find('\0') == std::string::npos, "remote path contains NUL");
     PacketCipher incoming(Bytes(init.begin() + 27, init.begin() + 59)),
         outgoing(Bytes(init.begin() + 59, init.begin() + 91));
@@ -145,6 +156,13 @@ inline void remote_helper(FrameChannel& channel) {
     put(ready, 8, udp.fd >= 0 ? udp_port(udp.fd) : 0, 2);
     diagnostic("helper READY UDP port=" + std::to_string(get(ready, 8, 2)));
     channel.send(Control::Ready, ready);
+    // Requirement: open stateful firewalls/NATs on this side by sending first; the sender's probes then arrive as replies.
+    sockaddr_in punch{};
+    bool punching = udp.fd >= 0 && sender_port && sender_address(punch);
+    punch.sin_port = htons(sender_port);
+    diagnostic(punching ? "helper punching toward sender " + endpoint(punch)
+                        : "helper not punching (no sender UDP port or SSH_CONNECTION IPv4 address)");
+    Time punch_at = 0;
     bool selected = false, direct = false, peer_known = false, closed = false, published = false;
     sockaddr_in peer{};
     uint64_t scheduled = 0;
@@ -177,40 +195,46 @@ inline void remote_helper(FrameChannel& channel) {
                 break;
             now = session_now();
 
-            // Replace the rigid if/else block inside the helper loop with this flexible router:
-            if (frame.type == Control::Select) {
-                if (!selected) {
-                    require(frame.bytes.size() == 1 && frame.bytes[0] >= 1 && frame.bytes[0] <= 2, "invalid select payload");
-                    direct = frame.bytes[0] == uint8_t(RemoteMode::Udp);
-                    require(!direct || (udp.fd >= 0 && peer_known), "UDP reachability was not authenticated");
-                    if (!direct && udp.fd >= 0) {
-                        close(udp.fd);
-                        udp.fd = -1;
-                    }
-                    diagnostic(direct ? "helper selected direct UDP" : "helper selected SSH/TCP");
-                    selected = true;
-                    channel.send(Control::Selected, frame.bytes);
-                } else {
-                    // Silently tolerate or respond to duplicate select frames on zero-latency paths
-                    channel.send(Control::Selected, Bytes{uint8_t(direct ? RemoteMode::Udp : RemoteMode::Ssh)});
+            if (frame.type == Control::Select && !selected) {
+                require(frame.bytes.size() == 1 && frame.bytes[0] >= 1 && frame.bytes[0] <= 2,
+                        "invalid select payload");
+                direct = frame.bytes[0] == uint8_t(RemoteMode::Udp);
+                require(!direct || (udp.fd >= 0 && peer_known),
+                        "UDP reachability was not authenticated");
+                if (!direct && udp.fd >= 0) {
+                    close(udp.fd);
+                    udp.fd = -1;
                 }
+                diagnostic(direct ? "helper selected direct UDP" : "helper selected SSH/TCP");
+                selected = true;
+                channel.send(Control::Selected, frame.bytes);
+            } else if (frame.type == Control::Select) {
+                // A repeated identical selection is harmless; any other change of mode is a protocol error.
+                require(frame.bytes ==
+                            Bytes{uint8_t(direct ? RemoteMode::Udp : RemoteMode::Ssh)},
+                        "conflicting transport selection");
+                diagnostic("helper ignoring duplicate SELECT");
             } else if (frame.type == Control::Packet && selected && !direct && !published) {
                 Transmission packet;
                 require(decode_data(frame.bytes, packet) && get(frame.bytes, 8, 8) == session &&
                             receiver.accept(packet, now),
                         "invalid tunneled DATA");
             } else if (frame.type == Control::Finish && selected && !published && finish.empty()) {
-                require(frame.bytes.size() == 40 && get(frame.bytes, 0, 8) == total, "invalid finish request");
+                require(frame.bytes.size() == 40 && get(frame.bytes, 0, 8) == total,
+                        "invalid finish request");
                 finish = std::move(frame.bytes);
-            } else if (frame.type == Control::Close && frame.bytes.empty() && published) {
+            } else if (frame.type == Control::Close && frame.bytes.empty() && published)
                 return;
-            } else {
-                // Ignore harmless background frames (like duplicate INIT or late tick packets)
-                // rather than throwing a runtime panic.
-                diagnostic("helper ignoring unhandled frame type=" + std::to_string(unsigned(frame.type)));
-            }           
+            else
+                throw std::runtime_error("unexpected SSH session message type=" +
+                                         std::to_string(unsigned(frame.type)));
+            if (!published)
+                deadline = now + 15000000;
         }
-
+        if (punching && !selected && now >= punch_at) {
+            raw_send(udp.fd, punch, encrypted_record(outgoing, 3, {}), true);
+            punch_at = now + 100000;
+        }
         Bytes sealed, plain;
         sockaddr_in from{};
         bool received = !published && raw_receive(udp.fd, sealed, from);
@@ -284,8 +308,10 @@ inline void remote_copy(const std::string& source, const std::string& target,
     diagnostic("sender source bytes=" + std::to_string(total));
     SshProcess ssh(host, options.ssh_program, options.remote_program, options.ssh_config);
     FrameChannel channel(ssh.fd(), ssh.fd());
-    Bytes init(93 + destination.size());
-    put(init, 0, 0x55465331, 4);
+    ScopedFd udp(options.mode == RemoteMode::Ssh ? -1 : udp_socket());
+    diagnostic("sender local UDP port=" + std::to_string(udp.fd >= 0 ? udp_port(udp.fd) : 0));
+    Bytes init(95 + destination.size());
+    put(init, 0, 0x55465332, 4);
     put(init, 4, total, 8);
     put(init, 12, session, 8);
     init[20] = uint8_t(options.mode);
@@ -294,7 +320,8 @@ inline void remote_copy(const std::string& source, const std::string& target,
     put(init, 25, options.delay_ms, 2);
     std::copy(keys.begin(), keys.end(), init.begin() + 27);
     put(init, 91, destination.size(), 2);
-    std::copy(destination.begin(), destination.end(), init.begin() + 93);
+    put(init, 93, udp.fd >= 0 ? udp_port(udp.fd) : 0, 2);
+    std::copy(destination.begin(), destination.end(), init.begin() + 95);
     diagnostic("sender sending INIT; waiting for remote helper READY");
     channel.send(Control::Init, init);
     OPENSSL_cleanse(keys.data(), keys.size());
@@ -302,8 +329,6 @@ inline void remote_copy(const std::string& source, const std::string& target,
     auto ready = channel.expect(Control::Ready, 30000000).bytes;
     require(ready.size() == 10 && get(ready, 0, 8) <= total, "invalid remote ready response");
     diagnostic("sender READY received remote UDP port=" + std::to_string(get(ready, 8, 2)));
-    ScopedFd udp(options.mode == RemoteMode::Ssh ? -1 : udp_socket());
-    diagnostic("sender local UDP port=" + std::to_string(udp.fd >= 0 ? udp_port(udp.fd) : 0));
     sockaddr_in peer{};
     bool direct = false;
     if (options.mode != RemoteMode::Ssh && udp.fd >= 0 && get(ready, 8, 2)) {
@@ -332,6 +357,10 @@ inline void remote_copy(const std::string& source, const std::string& target,
                 if (raw_receive(udp.fd, sealed, from)) {
                     bool expected_peer = same_peer(peer, from);
                     bool authenticated = expected_peer && incoming.open(sealed, plain);
+                    if (authenticated && plain[0] == 3) {
+                        diagnostic("sender received helper punch from=" + endpoint(from));
+                        continue;
+                    }
                     direct = authenticated && plain.size() == PacketCipher::MAX_PLAIN &&
                              plain[0] == 1 && Bytes(plain.begin() + 1, plain.end()) == challenge;
                     diagnostic("sender UDP probe reply from=" + endpoint(from) +
@@ -340,20 +369,9 @@ inline void remote_copy(const std::string& source, const std::string& target,
                                " authenticated=" + std::to_string(authenticated) +
                                " challenge-matched=" + std::to_string(direct));
                 }
-                // Frame unexpected;
-                // require(!channel.next(unexpected), "unexpected control message during UDP probe");
-                // Allow the control channel to process incoming state updates 
-                // instead of panicking if a frame arrives early.
-                Frame control_frame;
-                if (channel.next(control_frame)) {
-                    if (control_frame.type == Control::Error) {                        
-                        throw std::runtime_error("remote error: " + 
-                            std::string(control_frame.bytes.begin(), control_frame.bytes.end()));
-                       }
-                // If it's any other control message, cache or hold it, but don't abort
-                diagnostic("sender received early control frame type=" + std::to_string(unsigned(control_frame.type)));
-                }
-
+                // Error frames throw inside next(); nothing else is valid before SELECT.
+                Frame unexpected;
+                require(!channel.next(unexpected), "unexpected control message during UDP probe");
                 if (!direct)
                     channel.wait(1000, udp.fd);
             }
@@ -405,29 +423,17 @@ inline void remote_copy(const std::string& source, const std::string& target,
         auto events = sender.events();
         if (direct && options.bbr)
             controller.feedback(events, now);
-        // Safely process or step past background frames on the SSH wire 
-        // without crashing your ongoing direct UDP transport stream.
+        // Error frames throw inside next(); direct UDP expects no other SSH traffic during transfer.
         for (unsigned count = 0; count < 16; ++count) {
             Frame frame;
             if (!channel.next(frame))
                 break;
-                
-            if (!direct) {
-                // Tunneled SSH mode requires packet validation
-                require(frame.type == Control::Packet, "invalid tunneled control frame format");
-                Ack ack;
-                require(decode_ack(frame.bytes, ack) && get(frame.bytes, 8, 8) == session &&
-                            sender.acknowledge(ack, session_now()),
-                        "invalid tunneled ACK");
-            } else {
-                // In direct UDP mode, handle errors if they happen, 
-                // but ignore benign background frames or late duplicate select tokens.
-                if (frame.type == Control::Error) {
-                    throw std::runtime_error("remote engine error: " + 
-                        std::string(frame.bytes.begin(), frame.bytes.end()));
-                }
-                diagnostic("sender ignoring background SSH frame type=" + std::to_string(unsigned(frame.type)));
-            }
+            require(!direct && frame.type == Control::Packet,
+                    "unexpected SSH message during transfer");
+            Ack ack;
+            require(decode_ack(frame.bytes, ack) && get(frame.bytes, 8, 8) == session &&
+                        sender.acknowledge(ack, session_now()),
+                    "invalid tunneled ACK");
         }
 
         if (direct && receive_data_record(udp.fd, peer, incoming, bytes) &&

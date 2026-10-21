@@ -284,7 +284,12 @@ int main(int argc, char** argv) {
                               : value == "udp" ? RemoteMode::Udp
                                                : RemoteMode::Ssh;
             } else if (copy && key == "--remote-program")
+            {
+                // Prevent option injection (strings starting with '-')
+                require(!value.empty() && value[0] != '-', 
+                "invalid --remote-program value: cannot be an option flag");
                 remote.remote_program = value;
+            }
             else if (copy && key == "--ssh-config")
                 remote.ssh_config = value;
             else if (copy && key == "--ssh-program")

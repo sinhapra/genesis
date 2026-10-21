@@ -24,4 +24,7 @@ test: ufcp transport-test controller-test session-test
 ssh-test: ufcp
 	python3 tests/ssh.py ./ufcp
 
-.PHONY: test ssh-test
+netns-test: ufcp
+	python3 tests/netns.py ./ufcp
+
+.PHONY: test ssh-test netns-test

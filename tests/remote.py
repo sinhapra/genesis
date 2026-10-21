@@ -53,7 +53,7 @@ def raw_helper(root, name, bad_hash=False, drop_after_publish=False):
     target = root / (name + '.out')
     payload = b'hello authenticated session'
     path = str(target).encode()
-    init = struct.pack('!IQQBHHH', 0x55465331, len(payload), 123, 2, 32, 64, 0) + os.urandom(64) + struct.pack('!H', len(path)) + path
+    init = struct.pack('!IQQBHHH', 0x55465332, len(payload), 123, 2, 32, 64, 0) + os.urandom(64) + struct.pack('!HH', len(path), 0) + path
     process = subprocess.Popen([binary, '--helper'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         process.stdin.write(frame(1, init)); process.stdin.flush()

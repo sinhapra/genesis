@@ -135,12 +135,6 @@ class FrameChannel {
                 diagnostic("SSH read " + std::string(n == 0 ? "EOF" : strerror(errno)) +
                            " buffered-bytes=" + std::to_string(input_bytes_.size()));
             require(n > 0, "SSH channel closed before session completion");
-            // Check if we are still hunting for the first valid UFC framing sequence
-            if (input_bytes_.empty() && n >= 4) {
-                // Look for your protocol headers or structure before appending garbage strings
-                // If the buffer starts with arbitrary welcome text, discard it safely until the magic framing bytes clear
-                }
-            input_bytes_.insert(input_bytes_.end(), buffer.begin(), buffer.begin() + n);
             input_bytes_.insert(input_bytes_.end(), buffer.begin(), buffer.begin() + n);
         }
         return false;
@@ -220,18 +214,16 @@ class SshProcess {
             arguments.push_back(config);
         }
         arguments.push_back(host);
-        // Force the remote shell to run entirely silently, bypass terminal banners,
-        // and discover the 'ufcp' binary wherever it sits on the target machine.
-        // Use a strict subshell execution block that completely swallows environment warnings 
-        // and limits stdout purely to the raw binary output streams of your helper.
-        std::string robust_remote_payload = 
-        "exec 2>/dev/null; export LANG=C; export LC_ALL=C; "
-        "if command -v " + remote_program + " >/dev/null 2>&1; then " + shell_quote(remote_program) + " --helper" + (debug_enabled ? " --debug" : "") + "; "
-        "elif [ -x ./" + remote_program + " ]; then ./" + remote_program + " --helper" + (debug_enabled ? " --debug" : "") + "; "
-        "elif [ -x ~/bin/" + remote_program + " ]; then ~/bin/" + remote_program + " --helper" + (debug_enabled ? " --debug" : "") + "; "
-        "else exit 127; fi";
-
-arguments.push_back(robust_remote_payload);
+        // Every use of remote_program is shell-quoted so the path stays literal on the remote side.
+        std::string helper_args = std::string(" --helper") + (debug_enabled ? " --debug" : "");
+        std::string quoted = shell_quote(remote_program);
+        std::string robust_remote_payload =
+            "export LANG=C; export LC_ALL=C; "
+            "if command -v " + quoted + " >/dev/null 2>&1; then exec " + quoted + helper_args + "; "
+            "elif [ -x ./" + quoted + " ]; then exec ./" + quoted + helper_args + "; "
+            "elif [ -x ~/bin/" + quoted + " ]; then exec ~/bin/" + quoted + helper_args + "; "
+            "else echo 'ufcp remote helper binary not found' >&2; exit 127; fi";
+        arguments.push_back(robust_remote_payload);
         std::vector<char*> argv;
         for (auto& argument : arguments)
             argv.push_back(&argument[0]);

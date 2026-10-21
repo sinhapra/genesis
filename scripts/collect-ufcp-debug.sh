@@ -11,6 +11,12 @@ binary="$project/ufcp"
 source_file=$1
 target=$2
 remote_program=${3:-ufcp}
+if (( $# > 3 )) || [[ $remote_program == -* ]]; then
+    echo "Error: expected at most 3 arguments, and the third must be the remote ufcp path, not an option." >&2
+    echo "This script already passes --transport=udp --debug; do not add ufcp options." >&2
+    echo "Usage: $0 SOURCE [user@]HOST:NEW_DEST [REMOTE_UFCP]" >&2
+    exit 2
+fi
 log=$(mktemp "./ufcp-debug-$(date +%Y%m%d-%H%M%S)-XXXXXX.log") || exit 1
 printf 'Collecting diagnostics in %s\n' "$log"
 {
