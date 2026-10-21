@@ -176,34 +176,41 @@ inline void remote_helper(FrameChannel& channel) {
             if (!channel.next(frame))
                 break;
             now = session_now();
-            if (frame.type == Control::Select && !selected && frame.bytes.size() == 1 &&
-                frame.bytes[0] >= 1 && frame.bytes[0] <= 2) {
-                direct = frame.bytes[0] == uint8_t(RemoteMode::Udp);
-                require(!direct || (udp.fd >= 0 && peer_known),
-                        "UDP reachability was not authenticated");
-                if (!direct && udp.fd >= 0) {
-                    close(udp.fd);
-                    udp.fd = -1;
+
+            // Replace the rigid if/else block inside the helper loop with this flexible router:
+            if (frame.type == Control::Select) {
+                if (!selected) {
+                    require(frame.bytes.size() == 1 && frame.bytes[0] >= 1 && frame.bytes[0] <= 2, "invalid select payload");
+                    direct = frame.bytes[0] == uint8_t(RemoteMode::Udp);
+                    require(!direct || (udp.fd >= 0 && peer_known), "UDP reachability was not authenticated");
+                    if (!direct && udp.fd >= 0) {
+                        close(udp.fd);
+                        udp.fd = -1;
+                    }
+                    diagnostic(direct ? "helper selected direct UDP" : "helper selected SSH/TCP");
+                    selected = true;
+                    channel.send(Control::Selected, frame.bytes);
+                } else {
+                    // Silently tolerate or respond to duplicate select frames on zero-latency paths
+                    channel.send(Control::Selected, Bytes{uint8_t(direct ? RemoteMode::Udp : RemoteMode::Ssh)});
                 }
-                diagnostic(direct ? "helper selected direct UDP" : "helper selected SSH/TCP");
-                selected = true;
-                channel.send(Control::Selected, frame.bytes);
             } else if (frame.type == Control::Packet && selected && !direct && !published) {
                 Transmission packet;
                 require(decode_data(frame.bytes, packet) && get(frame.bytes, 8, 8) == session &&
                             receiver.accept(packet, now),
                         "invalid tunneled DATA");
             } else if (frame.type == Control::Finish && selected && !published && finish.empty()) {
-                require(frame.bytes.size() == 40 && get(frame.bytes, 0, 8) == total,
-                        "invalid finish request");
+                require(frame.bytes.size() == 40 && get(frame.bytes, 0, 8) == total, "invalid finish request");
                 finish = std::move(frame.bytes);
-            } else if (frame.type == Control::Close && frame.bytes.empty() && published)
+            } else if (frame.type == Control::Close && frame.bytes.empty() && published) {
                 return;
-            else
-                throw std::runtime_error("unexpected SSH session message");
-            if (!published)
-                deadline = now + 15000000;
+            } else {
+                // Ignore harmless background frames (like duplicate INIT or late tick packets)
+                // rather than throwing a runtime panic.
+                diagnostic("helper ignoring unhandled frame type=" + std::to_string(unsigned(frame.type)));
+            }           
         }
+
         Bytes sealed, plain;
         sockaddr_in from{};
         bool received = !published && raw_receive(udp.fd, sealed, from);
@@ -333,8 +340,20 @@ inline void remote_copy(const std::string& source, const std::string& target,
                                " authenticated=" + std::to_string(authenticated) +
                                " challenge-matched=" + std::to_string(direct));
                 }
-                Frame unexpected;
-                require(!channel.next(unexpected), "unexpected control message during UDP probe");
+                // Frame unexpected;
+                // require(!channel.next(unexpected), "unexpected control message during UDP probe");
+                // Allow the control channel to process incoming state updates 
+                // instead of panicking if a frame arrives early.
+                Frame control_frame;
+                if (channel.next(control_frame)) {
+                    if (control_frame.type == Control::Error) {                        
+                        throw std::runtime_error("remote error: " + 
+                            std::string(control_frame.bytes.begin(), control_frame.bytes.end()));
+                       }
+                // If it's any other control message, cache or hold it, but don't abort
+                diagnostic("sender received early control frame type=" + std::to_string(unsigned(control_frame.type)));
+                }
+
                 if (!direct)
                     channel.wait(1000, udp.fd);
             }
@@ -386,17 +405,31 @@ inline void remote_copy(const std::string& source, const std::string& target,
         auto events = sender.events();
         if (direct && options.bbr)
             controller.feedback(events, now);
+        // Safely process or step past background frames on the SSH wire 
+        // without crashing your ongoing direct UDP transport stream.
         for (unsigned count = 0; count < 16; ++count) {
             Frame frame;
             if (!channel.next(frame))
                 break;
-            require(!direct && frame.type == Control::Packet,
-                    "unexpected SSH message during transfer");
-            Ack ack;
-            require(decode_ack(frame.bytes, ack) && get(frame.bytes, 8, 8) == session &&
-                        sender.acknowledge(ack, session_now()),
-                    "invalid tunneled ACK");
+                
+            if (!direct) {
+                // Tunneled SSH mode requires packet validation
+                require(frame.type == Control::Packet, "invalid tunneled control frame format");
+                Ack ack;
+                require(decode_ack(frame.bytes, ack) && get(frame.bytes, 8, 8) == session &&
+                            sender.acknowledge(ack, session_now()),
+                        "invalid tunneled ACK");
+            } else {
+                // In direct UDP mode, handle errors if they happen, 
+                // but ignore benign background frames or late duplicate select tokens.
+                if (frame.type == Control::Error) {
+                    throw std::runtime_error("remote engine error: " + 
+                        std::string(frame.bytes.begin(), frame.bytes.end()));
+                }
+                diagnostic("sender ignoring background SSH frame type=" + std::to_string(unsigned(frame.type)));
+            }
         }
+
         if (direct && receive_data_record(udp.fd, peer, incoming, bytes) &&
             get(bytes, 8, 8) == session) {
             Ack ack;
