@@ -222,9 +222,9 @@ with tempfile.TemporaryDirectory() as folder:
     print(f'PASS delayed-path comparison: window=1 {baseline:.3f}s; window=32 {windowed:.3f}s; {baseline/windowed:.2f}x', flush=True)
     existing = root / 'existing'
     existing.write_bytes(b'keep me')
-    result = subprocess.run([binary, 'recv', '127.0.0.1', str(free_port()), str(existing)], capture_output=True, timeout=3)
-    assert result.returncode != 0 and existing.read_bytes() == b'keep me'
-    print('PASS no overwrite', flush=True)
+    (root / 'replaced.out').write_bytes(b'old contents')
+    transfer(root, 'replaced', os.urandom(5000))
+    print('PASS existing destination is overwritten like scp', flush=True)
     result = subprocess.run([binary, 'send', '127.0.0.1', str(free_port()), str(existing)], capture_output=True, timeout=8)
     assert result.returncode != 0 and b'timeout' in result.stderr
     print('PASS unavailable receiver', flush=True)

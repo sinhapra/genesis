@@ -26,7 +26,7 @@ The user requested a simple UDP file-transfer implementation first. The original
 
 Limitations against the final requirements: no daemon, production streaming feature, IPv6, MTU discovery, or production system validation yet. Copy supports SSH/DNS names and IPv4 direct UDP; legacy send/recv require IPv4 literals. The controller is BBR-inspired, not BBRv3-conformant. Native UDP still requires reachability; accepted fallback carries payload over TCP and does not independently use our congestion controller. Legacy CRC32 alone detects accidental corruption; copy adds SSH, authenticated encryption, replay rejection and SHA-256. Publication is not power-loss durable; metadata checks do not provide source snapshot guarantees. Lost final confirmation can leave published output with an unconfirmed sender outcome.
 
-The receiver uses bounded memory and acknowledges accepted data after buffering it or writing contiguous bytes. Normal errors remove incomplete output; crashes may leave a .part file which is never silently reused. The filesystem must support hard links for no-overwrite publication. Per-attempt history, delivery sampling, and BBR-inspired pacing/flight budgets are implemented.
+The receiver uses bounded memory and acknowledges accepted data after buffering it or writing contiguous bytes. Normal errors remove incomplete output; crashes may leave a .part file which is never silently reused. Publication renames the verified temporary file over the destination, replacing an existing file like scp. Per-attempt history, delivery sampling, and BBR-inspired pacing/flight budgets are implemented.
 
 Validation (2026-10-19): compiled with GCC in Debian WSL using C++17 and warning flags. Integration tests passed for empty/small/binary files, an exact payload boundary, a file larger than 1 MiB, deterministic loss of START/DATA/FINISH and their ACKs, duplicate datagrams, corrupted DATA, existing-destination protection, and unavailable-receiver timeout. These are loopback tests, not cross-machine performance or Internet congestion-control validation.
 
@@ -250,7 +250,8 @@ UDP alone does not guarantee better throughput than TCP. Performance claims requ
 - Resolved for the present controller: use an independent implementation with pinned conceptual references; no source adaptation.
 - Is a separate BBR process required, or is a userspace module sufficient?
 - What throughput, RTT, file-size, concurrency, and memory targets matter?
-- Does completion promise durable storage? What is the overwrite policy?
+- Resolved: overwrite like scp. An existing destination file is atomically replaced after verification and keeps its permissions; a directory destination is refused.
+- Does completion promise durable storage?
 - Are resume, multiple files, and deadline-sensitive streaming initial requirements or later extensions?
 
 ## References

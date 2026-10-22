@@ -83,19 +83,29 @@ LogLevel ERROR
             if name.startswith('strict-udp'):
                 assert 'Controller: bbr-inspired' in result.stdout
                 if '--debug' in extra:
-                    for marker in ('role=sender startup', 'role=helper startup',
+                    for marker in ('role=client startup', 'role=helper startup',
                                    'helper READY UDP port=', 'challenge-matched=1',
                                    'SSH exit code=0'):
                         assert marker in result.stderr, (marker, result.stderr)
                 else:
                     assert 'ufcp-debug' not in result.stderr, result.stderr
                 print(result.stdout.strip(), flush=True)
+        remote = root / "remote source ' ; $(printf ignored)"
+        remote.write_bytes(source.read_bytes())
+        for name, extra, expected in [('download-tunnel', ['--transport=ssh'], 'SSH/TCP'),
+                                      ('download-direct', ['--transport=udp', '--udp-address=127.0.0.1'], 'direct UDP'),
+                                      ('download-fallback', ['--udp-address=127.0.0.2'], 'SSH/TCP')]:
+            local = root / (name + '.out')
+            result = run([binary, 'copy', 'ufcp-fixture:' + str(remote), str(local)] + options + extra)
+            assert result.returncode == 0, (result.stdout, result.stderr)
+            assert 'Transport: ' + expected in result.stdout and local.read_bytes() == source.read_bytes()
+            print('PASS real OpenSSH', name, flush=True)
         target = root / 'strict-unavailable'
         result = run(base + ['ufcp-fixture:' + str(target)] + options +
                      ['--debug', '--transport=udp', '--udp-address=127.0.0.2'])
         assert result.returncode != 0 and not target.exists()
         assert 'strict UDP mode forbids' in result.stderr, result.stderr
-        assert 'sender UDP negotiation complete reachable=0' in result.stderr
+        assert 'client UDP negotiation complete reachable=0' in result.stderr
         assert 'helper READY UDP port=' in result.stderr
         assert 'SSH exit code=' in result.stderr or 'cleanup: terminating SSH' in result.stderr
         assert not pathlib.Path(str(target) + '.part').exists()

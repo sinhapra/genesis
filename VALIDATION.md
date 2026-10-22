@@ -52,7 +52,7 @@ helper executable path, rejection of an unauthorized key, and host-key mismatch.
 | Tunnel semantics | Flow ACKs remain, but no userspace controller, DATA retry/loss timers or UDP probes |
 | Bounded framing | Fragmented/coalesced frames, invalid type/length/setup rejection, bounded nonblocking queues |
 | File integrity | Known SHA-256 vector, empty/binary files, wrong final SHA-256 rejected before publication |
-| File/path policies | Spaces/quotes/shell metacharacters treated as path data, no-overwrite preserved, slow disk queues |
+| File/path policies | Spaces/quotes/shell metacharacters treated as path data, scp-like overwrite keeping permissions, directory destination refused, slow disk queues |
 | Failure outcomes | SSH EOF removes incomplete output; published output survives disconnect; missing COMPLETE produces unconfirmed sender outcome |
 
 Sanitized session/helper checks also pass with this WSL-specific non-PIE build:
@@ -87,7 +87,7 @@ explicit. No leak-check or cross-host production-security claim is made.
 | Wire validation | Version, reserved bytes, CRC, lengths, overflow offsets and malformed DATA |
 | Recovery | DATA/ACK loss, 600 ms ACK blackout, burst loss, tail loss, corruption, duplicates, delayed originals and reordered ACKs |
 | File workers | Slow producer/consumer integration, `/dev/full` write failure, read failure, queue bound, blocked-producer cancellation |
-| Completion | Empty/binary/exact-boundary/4 MiB files, no-overwrite policy, source mutation, incomplete cleanup, lost final confirmation |
+| Completion | Empty/binary/exact-boundary/4 MiB files, overwrite policy, source mutation, incomplete cleanup, lost final confirmation |
 | Controller boundary | Replaceable pacing and byte-flight budget; bounded per-attempt send/ACK/loss events with unique-delivery flags |
 
 The integration suite passes 22 acceptance cases/groups, including the delayed

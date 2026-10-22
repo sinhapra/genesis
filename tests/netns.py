@@ -77,7 +77,7 @@ def firewall(name, rules):
         run('iptables', '-A', 'OUTPUT', '-p', 'udp', '-j', 'DROP', ns=name)
 
 
-def copy(root, fixture, name, mode, song_rules, sender_rules, expect, nat=False):
+def copy(root, fixture, name, mode, song_rules, sender_rules, expect, nat=False, download=False):
     firewall('song', song_rules)
     firewall('sender', sender_rules)
     run('iptables', '-t', 'nat', '-F', 'POSTROUTING', ns='router')
@@ -86,7 +86,9 @@ def copy(root, fixture, name, mode, song_rules, sender_rules, expect, nat=False)
     (root / 'client').write_text(ROUTER_WAN if nat else SENDER)
     source, target = root / (name + '.in'), root / (name + '.out')
     source.write_bytes(os.urandom(300000))
-    result = run(binary, 'copy', str(source), 'song:' + str(target), '--transport=' + mode,
+    # Both namespaces share the filesystem; "song:" marks which side reads or writes the file.
+    endpoints = ['song:' + str(source), str(target)] if download else [str(source), 'song:' + str(target)]
+    result = run(binary, 'copy', *endpoints, '--transport=' + mode,
                  '--ssh-program=' + str(fixture), '--remote-program=' + binary,
                  ns='sender', check=False)
     if expect == 'fail':
@@ -109,6 +111,12 @@ def inner():
                 copy(root, fixture, name, 'udp', song_rules, sender_rules, direct)
         copy(root, fixture, 'strict UDP with sender behind NAT and both firewalls', 'udp', 'stateful',
              'stateful', direct, nat=True)
+        copy(root, fixture, 'strict UDP download through both firewalls', 'udp', 'stateful',
+             'stateful', direct, download=True)
+        copy(root, fixture, 'strict UDP download with client behind NAT and both firewalls', 'udp',
+             'stateful', 'stateful', direct, nat=True, download=True)
+        copy(root, fixture, 'auto download falls back when song blocks all UDP', 'auto', 'no-udp',
+             'open', tunnel, download=True)
         copy(root, fixture, 'auto through stateful firewalls', 'auto', 'stateful', 'stateful', direct)
         copy(root, fixture, 'auto falls back when song blocks all UDP', 'auto', 'no-udp', 'open', tunnel)
         copy(root, fixture, 'strict UDP fails when song blocks all UDP', 'udp', 'no-udp', 'open', 'fail')

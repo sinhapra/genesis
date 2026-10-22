@@ -2,6 +2,7 @@
 import os
 import pathlib
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -32,6 +33,24 @@ def invoke(root, name, mode='auto', options=(), data=None, environment=None):
     return args, target
 
 
+def download(root, name, mode='auto', options=(), data=None, environment=None):
+    remote = root / (name + " ' ; $(printf injection) .remote")
+    local = root / (name + '.download')
+    data = os.urandom(65539) if data is None else data
+    remote.write_bytes(data)
+    args = [binary, 'copy', '127.0.0.1:' + str(remote), str(local),
+            '--ssh-program=' + str(root / 'ssh-fixture'), '--remote-program=' + binary,
+            '--transport=' + mode, *options]
+    result = subprocess.run(args, capture_output=True, text=True, timeout=30, env=environment)
+    assert result.returncode == 0, (name, result.returncode, result.stdout, result.stderr)
+    assert local.read_bytes() == data and not pathlib.Path(str(local) + '.part').exists()
+    assert 'received, verified with SHA-256' in result.stdout
+    tunneled = mode == 'ssh' or '--udp-address=127.0.0.2' in options
+    assert ('Transport: SSH/TCP' if tunneled else 'Transport: direct UDP') in result.stdout, result.stdout
+    print('PASS download', name, flush=True)
+    return result, local
+
+
 def frame(kind, data=b''):
     return struct.pack('!I', len(data) + 1) + bytes([kind]) + data
 
@@ -53,7 +72,7 @@ def raw_helper(root, name, bad_hash=False, drop_after_publish=False):
     target = root / (name + '.out')
     payload = b'hello authenticated session'
     path = str(target).encode()
-    init = struct.pack('!IQQBHHH', 0x55465332, len(payload), 123, 2, 32, 64, 0) + os.urandom(64) + struct.pack('!HH', len(path), 0) + path
+    init = struct.pack('!IQQBHHH', 0x55465333, len(payload), 123, 2, 32, 64, 0) + os.urandom(64) + struct.pack('!HHB', len(path), 0, 0) + path
     process = subprocess.Popen([binary, '--helper'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         process.stdin.write(frame(1, init)); process.stdin.flush()
@@ -182,11 +201,47 @@ while True:
     invoke(root, 'empty', 'ssh', data=b'')
     invoke(root, 'empty-udp', data=b'')
     invoke(root, 'slow-disk', 'ssh', ('--receive-chunks=2', '--io-delay-ms=3'))
-    args, target = invoke(root, 'no-overwrite', 'ssh')
-    original = target.read_bytes()
-    result = subprocess.run(args, capture_output=True, text=True, timeout=10)
-    assert result.returncode != 0 and 'destination already exists' in result.stderr and target.read_bytes() == original
-    print('PASS remote no-overwrite', flush=True)
+    args, target = invoke(root, 'overwrite', 'ssh')
+    target.chmod(0o644)
+    for mode in ('ssh', 'auto'):
+        args, target = invoke(root, 'overwrite', mode)
+        assert stat.S_IMODE(target.stat().st_mode) == 0o644, oct(target.stat().st_mode)
+    print('PASS remote overwrite keeps destination permissions like scp', flush=True)
+    folder = root / 'folder-target'
+    folder.mkdir()
+    source = root / 'folder.in'
+    source.write_bytes(b'data')
+    result = subprocess.run([binary, 'copy', str(source), '127.0.0.1:' + str(folder), '--transport=ssh',
+                             '--ssh-program=' + str(root / 'ssh-fixture'), '--remote-program=' + binary],
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0 and 'destination is a directory' in result.stderr and not any(folder.iterdir())
+    print('PASS remote directory destination refused', flush=True)
+    download(root, 'direct')
+    download(root, 'ssh', 'ssh')
+    download(root, 'fallback', options=('--udp-address=127.0.0.2',))
+    download(root, 'encrypted-impairments', 'udp', environment=dict(os.environ, UFCP_TEST_IMPAIR_UDP='1'))
+    download(root, 'empty', 'ssh', data=b'')
+    download(root, 'empty-udp', data=b'')
+    download(root, 'slow-disk', 'ssh', ('--receive-chunks=2', '--io-delay-ms=3'))
+    result, _ = download(root, 'stats', options=('--stats',))
+    assert 'Stats:' in result.stderr, result.stderr
+    print('PASS download --stats summary relayed from the remote sender', flush=True)
+    _, local = download(root, 'overwrite', 'ssh')
+    local.chmod(0o640)
+    _, local = download(root, 'overwrite')
+    assert stat.S_IMODE(local.stat().st_mode) == 0o640
+    print('PASS download overwrite keeps local permissions', flush=True)
+    local = root / 'missing.download'
+    result = subprocess.run([binary, 'copy', '127.0.0.1:' + str(root / 'no-such-file'), str(local),
+                             '--ssh-program=' + str(root / 'ssh-fixture'), '--remote-program=' + binary],
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0 and 'remote source must be a readable regular file' in result.stderr
+    assert not local.exists() and not pathlib.Path(str(local) + '.part').exists()
+    print('PASS download of missing remote file fails cleanly', flush=True)
+    for args, message in ((['a:x', 'b:y'], 'two remote hosts'), (['x', 'y'], 'must be [user@]host:path')):
+        result = subprocess.run([binary, 'copy', *args], capture_output=True, text=True, timeout=10)
+        assert result.returncode != 0 and message in result.stderr, result.stderr
+    print('PASS copy direction validation', flush=True)
     source, target = root / 'strict.in', root / 'strict.out'
     source.write_bytes(b'test')
     args = [binary, 'copy', str(source), '127.0.0.1:' + str(target), '--transport=udp',

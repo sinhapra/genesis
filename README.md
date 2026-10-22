@@ -16,15 +16,25 @@ make test
 ./ufcp copy source.bin user@host:/destination/file.bin
 ./ufcp copy source.bin user@host:/destination/file.bin --transport=ssh
 ./ufcp copy source.bin user@host:/destination/file.bin --transport=udp
+./ufcp copy user@host:/source/file.bin local-copy.bin          # download
 ```
+
+Like scp, the argument with a colon before any `/` is the remote side, so the same
+command uploads or downloads. Copies between two remote hosts are not supported.
+Downloads use the same SSH setup, UDP probe, hole punching and fallback; the remote
+helper then sends and the local side verifies and saves. Downloads always use the
+adaptive controller (`--cc=fixed` applies to uploads), and `--stats` lines come from
+the remote sender through SSH stderr.
 
 `auto` is the default: SSH authentication, a full-size encrypted UDP probe, then
 UDP or reported SSH/TCP fallback. `ssh` skips UDP entirely. `udp` requires native
 UDP and fails without fallback. Matching remote ufcp must be on PATH, or supplied
 with `--remote-program=/path/to/ufcp`. Existing SSH authentication/host-key policy
 is honored. `--ssh-config=FILE` selects an SSH config. No privileged tunnel or
-forwarding configuration is needed. Source must be regular and unchanged; output
-must not exist and its filesystem must support same-directory hard links.
+forwarding configuration is needed. Source must be regular and unchanged. Like scp,
+an existing destination file is replaced and keeps its permission bits; a directory
+is refused. The replacement is atomic: the file is written as `DEST.part` and renamed
+over the destination only after SHA-256 verification.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -60,7 +70,7 @@ ordered bounded reassembly, receiver credit, RTT recovery and paced retransmissi
 File I/O runs in bounded worker queues outside the feedback loop. Direct copy
 packets use OpenSSL ChaCha20-Poly1305 with independent directional keys exchanged
 through SSH, unique nonce counters and bounded replay rejection. Copy completion
-verifies SHA-256 and requires authenticated SSH confirmation after no-overwrite
+verifies SHA-256 and requires authenticated SSH confirmation after atomic
 publication. Errors also use SSH. See [PROTOCOL.md](PROTOCOL.md),
 [CONGESTION.md](CONGESTION.md), and [SSH.md](SSH.md) for exact contracts.
 
@@ -88,7 +98,7 @@ output lifecycle. The remaining files each own one part of the transfer:
 | `wire.hpp` | UDP packet encoding, validation and CRC |
 | `session_io.hpp` | SSH child lifetime and bounded control-message framing |
 | `crypto.hpp` | Authenticated UDP encryption, replay rejection and SHA-256 |
-| `file_io.hpp` | Bounded disk workers and no-overwrite output publication |
+| `file_io.hpp` | Bounded disk workers and atomic (scp-like overwriting) output publication |
 
 A file chunk keeps its byte offset across retries, while every transmission gets
 a new attempt number. The receiver ACKs buffered chunks but releases capacity only
@@ -115,8 +125,17 @@ Legacy datagrams are at most 1,062 bytes; encrypted copy datagrams at most 1,091
 `make test` runs deterministic transport/controller/crypto tests, impaired loopback
 transfers and remote-session fixtures. Coverage includes loss/reordering, malformed
 ACKs/control, ACK compression, capacity/RTT changes, zero credit, encrypted packet
-corruption/replay, slow disks, source mutation, no-overwrite, SHA-256 verification,
+corruption/replay, slow disks, source mutation, overwrite, SHA-256 verification,
 cleanup, and lost completion confirmation. See [VALIDATION.md](VALIDATION.md).
+
+`make wan-test` runs `ufcp copy --stats` across an emulated WAN and streams the live
+per-second statistics, then copies the same size with kernel TCP over the same link
+and prints both rates. Defaults model a 75 ms, 40 Mbit/s, 0.001%-loss home link with
+a 256 KB router buffer and 100 MB of data; override with, for example,
+`make wan-test WAN_RTT=120 WAN_RATE=100 WAN_LOSS=0.01 WAN_SIZE=500 WAN_BUFFER=512`;
+add `WAN_DIRECTION=download` to test downloads.
+It needs user namespaces, iproute2 and /dev/net/tun (no root or netem) and changes
+nothing outside its namespaces. It fails only on a failed copy or wrong output.
 
 `make ssh-test` additionally uses a temporary unprivileged real OpenSSH server.
 Set `UFCP_TEST_SSHD=/path/to/sshd` if needed. All keys/configuration are temporary;

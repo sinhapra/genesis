@@ -11,10 +11,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <cerrno>
+#include <cstdio>
 #include <fcntl.h>
 
 namespace ufcp {
-// Requirement: publish verified files without overwriting, and remove temporary output on normal failure.
+// Requirement: publish verified files like scp (replace an existing file), and remove temporary output on normal failure.
 class OutputFile {
     std::string destination_, temporary_;
     int fd_ = -1;
@@ -22,9 +23,15 @@ class OutputFile {
   public:
     explicit OutputFile(const std::string& destination)
         : destination_(destination), temporary_(destination + ".part") {
-        require(access(destination_.c_str(), F_OK) != 0, "destination already exists");
+        struct stat existing {};
+        bool replace = stat(destination_.c_str(), &existing) == 0;
+        require(!replace || !S_ISDIR(existing.st_mode), "destination is a directory");
+        require(!replace || S_ISREG(existing.st_mode), "destination exists and is not a regular file");
         fd_ = open(temporary_.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
         require(fd_ >= 0, "cannot create temporary output");
+        // Like scp, an overwritten file keeps its permission bits; new files stay owner-only.
+        if (replace)
+            require(fchmod(fd_, existing.st_mode & 07777) == 0, "cannot copy destination permissions");
     }
     ~OutputFile() {
         close(fd_);
@@ -36,10 +43,8 @@ class OutputFile {
         return fd_;
     }
     void publish() {
-        // The hard link atomically fails if another transfer has already created the destination.
-        require(link(temporary_.c_str(), destination_.c_str()) == 0,
-                "cannot finalize destination (exists or filesystem error)");
-        require(unlink(temporary_.c_str()) == 0, "cannot remove temporary name");
+        // rename atomically replaces any existing destination, so readers never see a partial file.
+        require(rename(temporary_.c_str(), destination_.c_str()) == 0, "cannot finalize destination");
     }
 };
 // Requirement: bounded producer/consumer queues keep blocking disk operations outside the network loop.

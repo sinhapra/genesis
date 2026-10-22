@@ -247,7 +247,7 @@ int main(int argc, char** argv) {
         }
         bool copy = argc >= 2 && std::string(argv[1]) == "copy";
         int option_start = copy ? 4 : 5;
-        require(argc >= option_start, copy ? "usage: ufcp copy SOURCE [user@]HOST:DEST [OPTIONS]"
+        require(argc >= option_start, copy ? "usage: ufcp copy SOURCE DEST [OPTIONS] (SOURCE or DEST is [user@]HOST:PATH)"
                                            : "usage: ufcp send|recv IPv4 PORT FILE [OPTIONS]");
         RemoteOptions remote;
         TransferOptions& config = remote;

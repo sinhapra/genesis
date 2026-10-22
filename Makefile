@@ -27,4 +27,14 @@ ssh-test: ufcp
 netns-test: ufcp
 	python3 tests/netns.py ./ufcp
 
-.PHONY: test ssh-test netns-test
+# Emulated WAN with live --stats output; override e.g. make wan-test WAN_RTT=75 WAN_RATE=40 WAN_LOSS=0.001 WAN_SIZE=100 WAN_DIRECTION=download
+WAN_RTT ?= 75
+WAN_RATE ?= 40
+WAN_LOSS ?= 0.001
+WAN_SIZE ?= 100
+WAN_BUFFER ?= 256
+WAN_DIRECTION ?= upload
+wan-test: ufcp
+	python3 tests/wan.py ./ufcp $(WAN_RTT) $(WAN_RATE) $(WAN_LOSS) $(WAN_SIZE) $(WAN_BUFFER) $(WAN_DIRECTION)
+
+.PHONY: test ssh-test netns-test wan-test

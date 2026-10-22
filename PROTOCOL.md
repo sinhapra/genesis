@@ -87,7 +87,8 @@ START and FINISH use twenty attempts at 200 ms. Duplicate FINISH is answered for
 five seconds after publication. Missing final confirmation reports an unconfirmed
 outcome even if output was published.
 
-The adapter verifies stream size and CRC32 before no-overwrite publication. It
+The adapter verifies stream size and CRC32 before atomic publication by rename,
+which replaces an existing destination file (keeping its permissions). It
 accepts regular immutable source files and detects size/mtime/ctime changes.
 Worker errors fail the session; ordinary receiver failure removes incomplete
 output. Blocking file reads/writes run outside the pacing/ACK thread. Queue
