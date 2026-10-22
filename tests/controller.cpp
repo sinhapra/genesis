@@ -115,7 +115,8 @@ struct LinkResult {
 };
 // Requirement: exercise the real transport and controller against a deterministic finite bottleneck queue.
 LinkResult link_test(const char* name, bool changes, bool compressed) {
-    constexpr uint64_t total = 6 * 1024 * 1024;
+    // Long enough to include the second ProbeRTT after the RTT increase at 14 seconds.
+    constexpr uint64_t total = 8 * 1024 * 1024;
     Sender sender(total, 256 * PAYLOAD, 256);
     Receiver receiver(total, 256);
     CongestionController cc(256);

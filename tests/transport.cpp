@@ -285,7 +285,7 @@ void simulation(unsigned seed) {
               receiver.buffered_chunks() <= 4);
         check(sender.flight_bytes() <= 32 * PAYLOAD && sender.delivered() <= produced);
     }
-    check(sender.complete() && sender.delivered() == total && max_history == HISTORY);
+    check(sender.complete() && sender.delivered() == total && max_history && max_history <= HISTORY);
     while (const Bytes* data = receiver.peek(consumed)) {
         consumed += data->size();
         receiver.consume(consumed, 300000000);

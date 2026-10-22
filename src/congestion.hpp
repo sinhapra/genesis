@@ -122,7 +122,7 @@ class CongestionController {
     Mode mode_ = Mode::Startup;
     std::deque<std::pair<unsigned, double>> bandwidth_;
     double estimate_ = 0, full_bandwidth_ = 0, rate_ = INITIAL_RATE, rate_cap_ = MAX_RATE,
-           flight_cap_;
+           flight_cap_, cap_growth_ = PAYLOAD;
     uint64_t round_acked_ = 0, round_lost_ = 0, losses_ = 0;
     Time min_rtt_ = 100000, min_stamp_, phase_at_, probe_done_ = 0, probe_min_ = 0;
     Time last_feedback_, last_sent_, last_loss_, last_silence_, last_now_;
@@ -164,6 +164,7 @@ class CongestionController {
         if (mode_ != Mode::ProbeRTT)
             enter(Mode::Drain, now);
         plateau_ = 0;
+        cap_growth_ = PAYLOAD;
     }
 
   public:
@@ -262,8 +263,11 @@ class CongestionController {
                     enter(Mode::Drain, now);
             }
             if (!round_lost_) {
-                rate_cap_ = std::min(MAX_RATE, rate_cap_ * 1.1);
-                flight_cap_ = std::min<double>(maximum_, flight_cap_ + PAYLOAD);
+                // Like BBRv3 upward probing, regrow loss caps faster after each loss-free round:
+                // the inflight increment doubles per round (1, 2, 4... chunks) until the next loss.
+                rate_cap_ = std::min(MAX_RATE, rate_cap_ * 1.25);
+                flight_cap_ = std::min<double>(maximum_, flight_cap_ + cap_growth_);
+                cap_growth_ = std::min<double>(maximum_, cap_growth_ * 2);
             }
             round_acked_ = round_lost_ = 0;
         }

@@ -228,7 +228,7 @@ with tempfile.TemporaryDirectory() as folder:
     result = subprocess.run([binary, 'send', '127.0.0.1', str(free_port()), str(existing)], capture_output=True, timeout=8)
     assert result.returncode != 0 and b'timeout' in result.stderr
     print('PASS unavailable receiver', flush=True)
-    for option in ('--window=0', '--window=257', '--receive-chunks=0', '--receive-chunks=257', '--pace-us=0', '--cc=invalid', '--cc=bbr', '--pace-us=100'):
+    for option in ('--window=0', '--window=8193', '--receive-chunks=0', '--receive-chunks=8193', '--pace-us=0', '--cc=invalid', '--cc=bbr', '--pace-us=100'):
         result = subprocess.run([binary, 'send', '127.0.0.1', '9000', str(existing), option], capture_output=True, timeout=3)
         assert result.returncode != 0
     print('PASS configuration bounds', flush=True)

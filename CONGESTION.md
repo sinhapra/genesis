@@ -25,7 +25,7 @@ from ACK compression instead of dividing bytes by the latest inter-ACK gap.
 Network delivery counts each acknowledged transmission attempt once, including
 redundant attempts; file progress still counts unique logical bytes separately.
 Loss releases attempt flight accounting once but retains bounded metadata for
-late ACKs. The sampler keeps at most 4,096 records, retires non-flight records,
+late ACKs. The sampler keeps at most 32,768 records, retires non-flight records,
 and rejects duplicate send IDs. Duplicate ACK/loss events do not inflate totals.
 Idle epochs invalidate old bandwidth samples while preserving flight correctness.
 
@@ -40,7 +40,8 @@ complete. This is conservative: retry waiting is treated as limited too.
 All rates and flight counts use DATA payload bytes, not IP/wire overhead. The
 initial assumed RTT is 100 ms and initial pacing is 81,920 B/s. Telemetry reports
 zero minimum RTT until a real sample exists. Absolute rate bounds are 16,384 to
-100,000,000 B/s; the payload window is bounded by `--window` (1-256 chunks).
+100,000,000 B/s; the payload window is bounded by `--window` (1-8,192 chunks,
+default 4,096).
 These operating limits and retry/idle timeouts restrict supported paths; the rate
 floor is unsuitable for paths below 16 KiB/s without further tuning/validation.
 
@@ -58,7 +59,7 @@ floor is unsuitable for paths below 16 KiB/s without further tuning/validation.
 | PROBE_BW | Gains 1.2, 0.8, then six phases at 1.0; each phase lasts at least max(minimum RTT, 10 ms) |
 | PROBE_RTT | Enter after ten seconds without a lower RTT; reduce window to minimum, wait 200 ms after draining, require a fresh probe-era sample, then refresh RTT upward or downward |
 | Loss limits | When running round loss fraction exceeds 2%, reduce pacing cap and flight cap by 30%, at most once per max(minimum RTT, 50 ms); stop bandwidth probing |
-| Clean recovery | Each eligible loss-free round relaxes the rate cap by 10% and flight cap by one chunk |
+| Clean recovery | Each eligible loss-free round relaxes the rate cap by 25% and raises the flight cap by an increment that starts at one chunk and doubles per loss-free round until the next loss, similar to BBRv3's upward inflight probing |
 | Feedback silence | After max(three minimum RTTs, 500 ms), halve pacing cap and reduce window to minimum; repeat at the same interval until feedback resumes |
 | Idle restart | After no work/flight for max(minimum RTT, 200 ms), start a new sampling epoch, cap rate at initial pacing and window at eight chunks |
 
@@ -76,8 +77,9 @@ off control packets; DATA originals and retransmissions share controller budgets
 baseline for controlled comparisons. `--pace-us` requires `--cc=fixed`; it cannot
 silently override an adaptive controller. Successful adaptive transfers print a
 summary with controller state, estimated bandwidth, pacing, window, RTT and bytes
-declared lost. Declared loss can include spurious timeouts; it is not a direct
-measurement of dropped datagrams.
+declared lost. `copy --stats` reports the same quantities once per second on
+stderr, plus a final summary. Declared loss can include spurious timeouts; it is
+not a direct measurement of dropped datagrams.
 
 `make test` runs sampler/state traces, actual transport/controller simulations,
 and loopback file-transfer tests. `controller-test` writes CSV traces to
@@ -101,7 +103,10 @@ It uses a fixed eight-phase cycle and simple loss caps/recovery instead. Loss
 detection is the transport's time-based detector; reordering can cause spurious
 loss and conservative rate reductions. Timers, gain constants, supported rate
 bounds and memory limits are explicit project choices, not copied conformance
-parameters. High-BDP paths can be limited by the configured 256 KiB maximum.
+parameters. The 4 MiB default window (8 MiB maximum) bounds the supported
+bandwidth-delay product. In a userspace emulation of a 75 ms, 40 Mbit/s path with
+0.001% loss, copy reached 36.6 Mbit/s steady against 36.9 Mbit/s for kernel TCP;
+this is not a substitute for cross-host measurement.
 
 The simulations validate these chosen mechanisms, not Internet fairness or
 equivalence to BBRv3. Cross-host/netem experiments, competing TCP traffic, real

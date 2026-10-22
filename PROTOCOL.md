@@ -33,17 +33,23 @@ peer delay. Maximum ACK payload is 526 bytes.
 
 ## Bounds and retention
 
-Defaults: a 32-chunk sending cap, 64 receive chunks (64 KiB), 16 chunks per file queue,
+Defaults: a 4,096-chunk sending cap, 4,096 receive chunks (4 MiB), 16 chunks per file queue,
 adaptive DATA pacing, a 5 ms ACK timer and an ACK every two accepted DATA packets.
 The fixed test baseline (`--cc=fixed`) uses 1 ms DATA pacing.
-Sending window and receive capacity are configurable from 1 to 256 chunks.
-The receiver retains the most recent 4,096 accepted attempt numbers, coalesces
-them into ranges, and sends the newest 32 ranges. Dropped older receipt history
+Sending window and receive capacity are configurable from 1 to 8,192 chunks.
+Pacing keeps its own schedule: each DATA send moves the next deadline one interval
+past the previous deadline, with at most four intervals of catch-up, so loop overhead
+does not lower the rate. The copy loop sends up to 16 due DATA packets and reads up
+to 64 datagrams per pass.
+The receiver retains the most recent 32,768 accepted attempt numbers for duplicate
+checks and coalesces receipts into ranges as they arrive (at most 64 retained), so
+each ACK costs O(32), and sends the newest 32 ranges. Dropped older receipt history
 is recovered by a new DATA attempt. Duplicate DATA is acknowledged after stream
 consumption too. ACK delay is measured from the oldest pending ACK trigger.
 
-The sender retains at most 4,096 attempt records and its configured window of
-payload chunks. In-flight attempt records are never evicted. ACKed/lost records
+The sender retains at most 32,768 attempt records and its configured window of
+payload chunks. In-flight attempt records are never evicted. ACKed records are
+removed at once, so later ACK ranges only visit unacknowledged attempts; lost records
 are retired oldest first when space is needed; losing historical ACK eligibility
 never discards an undelivered payload. Every DATA send gets a new number. Each
 attempt has independent flight state. ACK or loss releases flight bytes once;

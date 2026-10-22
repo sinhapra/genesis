@@ -11,7 +11,7 @@
 namespace ufcp {
 using Bytes = std::vector<uint8_t>;
 using Time = int64_t;
-constexpr size_t PAYLOAD = 1024, MAX_CHUNKS = 256, HISTORY = 4096, MAX_RANGES = 32;
+constexpr size_t PAYLOAD = 1024, MAX_CHUNKS = 8192, HISTORY = 32768, MAX_RANGES = 32;
 constexpr Time MAX_ACK_DELAY = 25000, SILENCE = 10000000;
 inline void require(bool ok, const char* message) {
     if (!ok)
@@ -52,7 +52,7 @@ class Sender {
         Time sent;
         bool flight = true, acked = false;
     };
-    uint64_t total_, queued_ = 0, limit_, next_ = 1, flight_ = 0, delivered_ = 0;
+    uint64_t total_, queued_ = 0, limit_, next_ = 1, flight_ = 0, delivered_ = 0, sent_ = 0;
     size_t window_;
     // Logical chunks survive retries; each network attempt has its own congestion and ACK accounting.
     std::map<uint64_t, Chunk> chunks_;
@@ -123,6 +123,9 @@ class Sender {
     uint64_t flight_bytes() const {
         return flight_;
     }
+    uint64_t sent_bytes() const {
+        return sent_;
+    }
     uint64_t receive_limit() const {
         return limit_;
     }
@@ -183,6 +186,9 @@ class Sender {
         for (auto it = flying_.begin(); it != flying_.end();) {
             uint64_t number = *it;
             auto& attempt = history_.at(number);
+            // Attempts are in send order and every loss threshold is at least rto_.
+            if (now - attempt.sent < rto_)
+                break;
             auto chunk = chunks_.find(attempt.offset);
             Time threshold = chunk == chunks_.end() ? rto_ : timeout(chunk->second);
             if (attempt.flight && now - attempt.sent >= threshold) {
@@ -215,9 +221,12 @@ class Sender {
             history_.emplace(number, Attempt{entry.first, chunk.data.size(), now, true, false});
             flying_.insert(number);
             flight_ += chunk.data.size();
+            sent_ += chunk.data.size();
             ++chunk.attempts;
             chunk.last = now;
-            next_send_ = now + budget_.interval;
+            // Keep the pacing schedule on its own timeline so loop overhead is not lost; allow at most
+            // four intervals of catch-up so an idle or slow loop cannot release a large burst.
+            next_send_ = std::max(next_send_, now - 4 * budget_.interval) + budget_.interval;
             out = {number, entry.first, chunk.data};
             event({Event::Sent, number, entry.first, chunk.data.size(), now, now, false});
             return true;
@@ -241,10 +250,12 @@ class Sender {
         limit_ = std::max(limit_, ack.limit);
         for (auto range : ack.ranges) {
             for (auto it = history_.lower_bound(range.low);
-                 it != history_.end() && it->first <= range.high; ++it) {
+                 it != history_.end() && it->first <= range.high;) {
                 auto& attempt = it->second;
-                if (attempt.acked)
+                if (attempt.acked) {
+                    ++it;
                     continue;
+                }
                 attempt.acked = true;
                 progress = true;
                 if (attempt.flight) {
@@ -271,6 +282,8 @@ class Sender {
                 }
                 event({Event::Acknowledged, it->first, attempt.offset, attempt.bytes, attempt.sent,
                        now, unique});
+                // Acknowledged attempts need no further accounting; later ACKs then skip them.
+                it = history_.erase(it);
             }
         }
         if (progress) {
@@ -297,6 +310,7 @@ class Receiver {
     uint64_t total_, consumed_ = 0, capacity_;
     std::map<uint64_t, Bytes> buffered_;
     std::map<uint64_t, uint64_t> receipts_;
+    std::map<uint64_t, uint64_t> ranges_;
     size_t pending_ack_ = 0;
     Time ack_at_ = 0, first_ack_ = 0, last_now_ = 0;
     void clock(Time now) {
@@ -311,6 +325,31 @@ class Receiver {
         ++pending_ack_;
         if (immediate || pending_ack_ >= 2)
             ack_at_ = now;
+    }
+    // Coalesce receipts on arrival so each ACK costs O(MAX_RANGES) rather than O(HISTORY).
+    void note(uint64_t number) {
+        auto next = ranges_.upper_bound(number);
+        if (next != ranges_.begin()) {
+            auto previous = std::prev(next);
+            if (previous->second >= number)
+                return;
+            if (previous->second + 1 == number) {
+                previous->second = number;
+                if (next != ranges_.end() && next->first == number + 1) {
+                    previous->second = next->second;
+                    ranges_.erase(next);
+                }
+                return;
+            }
+        }
+        if (next != ranges_.end() && next->first == number + 1) {
+            uint64_t high = next->second;
+            ranges_.erase(next);
+            ranges_.emplace(number, high);
+        } else
+            ranges_.emplace(number, number);
+        while (ranges_.size() > 2 * MAX_RANGES)
+            ranges_.erase(ranges_.begin());
     }
 
   public:
@@ -360,6 +399,7 @@ class Receiver {
         } else if (packet.data.size() > consumed_ - offset)
             return false;
         receipts_.emplace(packet.number, offset);
+        note(packet.number);
         if (receipts_.size() > HISTORY)
             receipts_.erase(receipts_.begin());
         schedule(now, false);
@@ -396,15 +436,10 @@ class Receiver {
         Ack result;
         result.limit = limit();
         result.delay = pending_ack_ ? std::min(MAX_ACK_DELAY, now - first_ack_) : 0;
-        for (auto entry : receipts_) {
-            auto number = entry.first;
-            if (!result.ranges.empty() && result.ranges.back().high + 1 == number)
-                result.ranges.back().high = number;
-            else
-                result.ranges.push_back({number, number});
-        }
-        if (result.ranges.size() > MAX_RANGES)
-            result.ranges.erase(result.ranges.begin(), result.ranges.end() - MAX_RANGES);
+        auto first =
+            ranges_.size() > MAX_RANGES ? std::prev(ranges_.end(), MAX_RANGES) : ranges_.begin();
+        for (auto it = first; it != ranges_.end(); ++it)
+            result.ranges.push_back({it->first, it->second});
         pending_ack_ = 0;
         return result;
     }

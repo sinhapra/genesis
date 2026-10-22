@@ -258,6 +258,10 @@ int main(int argc, char** argv) {
                 debug_enabled = true;
                 continue;
             }
+            if (copy && option == "--stats") {
+                remote.stats = true;
+                continue;
+            }
             auto equal = option.find('=');
             require(equal != std::string::npos, "options require =VALUE");
             auto key = option.substr(0, equal), value = option.substr(equal + 1);

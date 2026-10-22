@@ -4,18 +4,20 @@
 #include "session_io.hpp"
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <cstdio>
 #include <iostream>
 
 namespace ufcp {
 enum class RemoteMode : uint8_t { Auto, Udp, Ssh };
 struct TransferOptions {
-    size_t window = 32, receive_chunks = 64;
+    size_t window = 4096, receive_chunks = 4096;
     unsigned delay_ms = 0;
     Time pace = 1000;
     bool bbr = true;
 };
 struct RemoteOptions : TransferOptions {
     RemoteMode mode = RemoteMode::Auto;
+    bool stats = false;
     std::string ssh_program = "ssh", remote_program = "ufcp", ssh_config, udp_address;
 };
 inline std::string endpoint(const sockaddr_in& peer) {
@@ -119,6 +121,56 @@ inline bool receive_data_record(int udp, const sockaddr_in& peer, PacketCipher& 
     packet.assign(plain.begin() + 1, plain.end());
     return valid(packet);
 }
+// Requirement: --stats exposes live transfer state (rate, model, RTT, window, loss) once per second.
+class TransferStats {
+    uint64_t total_, last_delivered_ = 0;
+    Time started_, next_;
+    bool direct_;
+
+  public:
+    TransferStats(uint64_t total, bool direct, Time now)
+        : total_(total), started_(now), next_(now + 1000000), direct_(direct) {}
+    void report(const Sender& sender, const CongestionController& controller, Time now) {
+        if (now < next_)
+            return;
+        double seconds = double(now - started_) / 1e6;
+        double interval = double(now - next_ + 1000000) / 1e6;
+        uint64_t delivered = sender.delivered();
+        std::fprintf(stderr, "stats t=%.1fs %.1f/%.1fMB %.0f%% rate=%.1fMbit/s inflight=%lluKB",
+                     seconds, delivered / 1e6, total_ / 1e6,
+                     total_ ? 100.0 * double(delivered) / double(total_) : 100.0,
+                     double(delivered - last_delivered_) * 8 / 1e6 / interval,
+                     (unsigned long long)(sender.flight_bytes() / 1024));
+        if (direct_)
+            std::fprintf(stderr,
+                         " mode=%s bw=%.1fMbit/s pacing=%.1fMbit/s cwnd=%lluKB min-rtt=%.1fms "
+                         "rto=%.1fms lost=%lluKB(%.2f%%)",
+                         controller.mode_name(), controller.bandwidth() * 8 / 1e6,
+                         controller.pacing_rate() * 8 / 1e6,
+                         (unsigned long long)(controller.window() / 1024),
+                         controller.min_rtt() / 1e3, sender.rto() / 1e3,
+                         (unsigned long long)(controller.losses() / 1024),
+                         sender.sent_bytes() ? 100.0 * double(controller.losses()) /
+                                                   double(sender.sent_bytes())
+                                             : 0.0);
+        std::fprintf(stderr, "\n");
+        last_delivered_ = delivered;
+        next_ = now + 1000000;
+    }
+    void summary(const Sender& sender, const CongestionController& controller, Time now) const {
+        double seconds = std::max(1e-6, double(now - started_) / 1e6);
+        std::printf("Stats: %.1fMB in %.1fs average=%.1fMbit/s sent=%.1fMB retransmitted=%.2f%%",
+                    sender.delivered() / 1e6, seconds, sender.delivered() * 8 / 1e6 / seconds,
+                    sender.sent_bytes() / 1e6,
+                    sender.sent_bytes() ? 100.0 * double(sender.sent_bytes() - sender.delivered()) /
+                                              double(sender.sent_bytes())
+                                        : 0.0);
+        if (direct_)
+            std::printf(" min-rtt=%.1fms lost=%lluKB", controller.min_rtt() / 1e3,
+                        (unsigned long long)(controller.losses() / 1024));
+        std::printf("\n");
+    }
+};
 inline Bytes completion(uint64_t total, const Bytes& hash) {
     require(hash.size() == 32, "invalid final digest");
     Bytes bytes(40);
@@ -161,7 +213,7 @@ inline void remote_helper(FrameChannel& channel) {
     bool punching = udp.fd >= 0 && sender_port && sender_address(punch);
     punch.sin_port = htons(sender_port);
     diagnostic(punching ? "helper punching toward sender " + endpoint(punch)
-                        : "helper not punching (no sender UDP port or SSH_CONNECTION IPv4 address)");
+                        : "helper not punching (no sender UDP port or SSH_CONNECTION IPv4)");
     Time punch_at = 0;
     bool selected = false, direct = false, peer_known = false, closed = false, published = false;
     sockaddr_in peer{};
@@ -235,35 +287,45 @@ inline void remote_helper(FrameChannel& channel) {
             raw_send(udp.fd, punch, encrypted_record(outgoing, 3, {}), true);
             punch_at = now + 100000;
         }
-        Bytes sealed, plain;
-        sockaddr_in from{};
-        bool received = !published && raw_receive(udp.fd, sealed, from);
-        bool authenticated = received && incoming.open(sealed, plain);
-        if (received && !selected)
-            diagnostic("helper UDP probe received from=" + endpoint(from) +
-                       " bytes=" + std::to_string(sealed.size()) +
-                       " authenticated=" + std::to_string(authenticated));
-        if (authenticated) {
-            now = session_now();
-            if (plain[0] == 1 && plain.size() == PacketCipher::MAX_PLAIN && !selected) {
-                peer = from;
-                peer_known = true;
-                bool replied = raw_send(udp.fd, peer, outgoing.seal(plain), true);
-                diagnostic("helper probe reply sent=" + std::to_string(replied) +
-                           " peer=" + endpoint(peer));
-                deadline = now + 15000000;
-            } else if (selected && direct && same_peer(peer, from) && plain[0] == 2) {
-                Bytes bytes(plain.begin() + 1, plain.end());
-                Transmission packet;
-                if (valid(bytes) && get(bytes, 8, 8) == session) {
-                    if (decode_data(bytes, packet) && receiver.accept(packet, now))
-                        deadline = now + 15000000;
-                    else if (bytes[4] == PROBE && bytes.size() == HEADER && !get(bytes, 16, 8)) {
-                        receiver.probe(now);
-                        deadline = now + 15000000;
+        // Drain queued datagrams in one pass so a fast sender is not limited to one packet per poll.
+        for (unsigned datagrams = 0; datagrams < 64; ++datagrams) {
+            Bytes sealed, plain;
+            sockaddr_in from{};
+            bool received = !published && raw_receive(udp.fd, sealed, from);
+            if (!received)
+                break;
+            bool authenticated = incoming.open(sealed, plain);
+            if (!selected)
+                diagnostic("helper UDP probe received from=" + endpoint(from) +
+                           " bytes=" + std::to_string(sealed.size()) +
+                           " authenticated=" + std::to_string(authenticated));
+            if (authenticated) {
+                now = session_now();
+                if (plain[0] == 1 && plain.size() == PacketCipher::MAX_PLAIN && !selected) {
+                    peer = from;
+                    peer_known = true;
+                    bool replied = raw_send(udp.fd, peer, outgoing.seal(plain), true);
+                    diagnostic("helper probe reply sent=" + std::to_string(replied) +
+                               " peer=" + endpoint(peer));
+                    deadline = now + 15000000;
+                } else if (selected && direct && same_peer(peer, from) && plain[0] == 2) {
+                    Bytes bytes(plain.begin() + 1, plain.end());
+                    Transmission packet;
+                    if (valid(bytes) && get(bytes, 8, 8) == session) {
+                        if (decode_data(bytes, packet) && receiver.accept(packet, now))
+                            deadline = now + 15000000;
+                        else if (bytes[4] == PROBE && bytes.size() == HEADER &&
+                                 !get(bytes, 16, 8)) {
+                            receiver.probe(now);
+                            deadline = now + 15000000;
+                        }
                     }
                 }
             }
+            if (selected && !published && receiver.ack_due(now) &&
+                (direct || channel.room(MAX_DATAGRAM)))
+                send_data_record(channel, udp.fd, peer, outgoing, direct,
+                                 ack_packet(session, receiver.ack(now)));
         }
         if (!published && !finish.empty() && receiver.complete() && writer.done()) {
             require(finish == completion(total, writer.hash()),
@@ -400,8 +462,11 @@ inline void remote_copy(const std::string& source, const std::string& target,
     sender.budget({options.window * PAYLOAD, direct ? options.pace : 0});
     CongestionController controller(options.window, session_now());
     FileReader reader(input.fd, original, options.delay_ms);
+    TransferStats stats(total, direct, session_now());
     while (!sender.complete() || !reader.done()) {
         channel.flush();
+        if (options.stats)
+            stats.report(sender, controller, session_now());
         Bytes bytes;
         while (sender.can_queue() && reader.pop(bytes))
             sender.queue(std::move(bytes));
@@ -412,10 +477,14 @@ inline void remote_copy(const std::string& source, const std::string& target,
                                 sender.flight_bytes() < controller.window());
             sender.budget(controller.budget());
         }
+        // Send every packet the pacing schedule allows now (bounded), not one per loop pass.
         Transmission packet;
-        if ((direct || channel.room(MAX_DATAGRAM)) && sender.next(now, packet))
+        unsigned burst = 0;
+        while (burst < 16 && (direct || channel.room(MAX_DATAGRAM)) && sender.next(now, packet)) {
             send_data_record(channel, udp.fd, peer, outgoing, direct, data_packet(session, packet));
-        else
+            ++burst;
+        }
+        if (!burst)
             sender.tick(now);
         if (sender.probe(now))
             send_data_record(channel, udp.fd, peer, outgoing, direct,
@@ -435,11 +504,11 @@ inline void remote_copy(const std::string& source, const std::string& target,
                         sender.acknowledge(ack, session_now()),
                     "invalid tunneled ACK");
         }
-
-        if (direct && receive_data_record(udp.fd, peer, incoming, bytes) &&
-            get(bytes, 8, 8) == session) {
+        for (unsigned count = 0; direct && count < 64; ++count) {
+            if (!receive_data_record(udp.fd, peer, incoming, bytes))
+                break;
             Ack ack;
-            if (decode_ack(bytes, ack))
+            if (get(bytes, 8, 8) == session && decode_ack(bytes, ack))
                 sender.acknowledge(ack, session_now());
         }
         events = sender.events();
@@ -486,6 +555,10 @@ inline void remote_copy(const std::string& source, const std::string& target,
               << " bytes verified with SHA-256 and finalized\n";
     if (direct && options.bbr)
         std::cout << "Controller: bbr-inspired\n";
+    if (options.stats) {
+        std::cout << std::flush;
+        stats.summary(sender, controller, session_now());
+    }
 }
 inline int helper_main() {
     FrameChannel channel(STDIN_FILENO, STDOUT_FILENO);

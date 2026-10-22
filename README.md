@@ -31,15 +31,23 @@ must not exist and its filesystem must support same-directory hard links.
 | `--transport=auto\|udp\|ssh` | auto | Copy transport policy |
 | `--debug` | off | Copy diagnostics and SSH verbose output, including remote helper stderr |
 | `--cc=bbr-inspired\|fixed` | bbr-inspired | Userspace direct-UDP controller or test baseline |
-| `--window=N` | 32 chunks | Maximum sending window, 1-256 |
-| `--receive-chunks=N` | 64 chunks | Receiver capacity, 1-256 |
+| `--stats` | off | Live transfer statistics on stderr once per second, plus a summary |
+| `--window=N` | 4,096 chunks | Maximum sending window, 1-8,192 |
+| `--receive-chunks=N` | 4,096 chunks | Receiver capacity, 1-8,192 |
 | `--pace-us=N` | 1,000 in fixed mode | 1-1,000,000; requires `--cc=fixed` |
 | `--io-delay-ms=N` | 0 | Artificial per-chunk disk delay, 0-1,000 |
 | `--remote-program=PATH` | ufcp | Literal remote helper executable |
 | `--ssh-config=FILE` | OpenSSH default | SSH host/credential/port configuration |
 | `--udp-address=HOST` | SSH destination host | Direct-UDP IPv4 address/hostname override |
 
-Options follow the destination. Chunks are 1,024 bytes except the final chunk.
+Options follow the destination. Chunks are 1,024 bytes except the final chunk, so the
+default window and receive capacity are 4 MiB each; the controller decides how much of
+the window to use. `--stats` prints lines such as
+`stats t=5.0s 16.0/500.0MB 3% rate=36.6Mbit/s inflight=452KB mode=probe-bw bw=37.8Mbit/s
+pacing=30.2Mbit/s cwnd=676KB min-rtt=75.5ms rto=101.3ms lost=1KB(0.01%)`: delivered bytes,
+goodput over the last second, bytes in flight, controller mode, bandwidth estimate, pacing
+rate, congestion window, minimum RTT, retransmission timeout and bytes declared lost.
+SSH/TCP mode shows only progress, rate and flow-control inflight.
 In SSH/TCP mode, outer TCP handles congestion and reliability: our controller,
 pacing, bandwidth probes and DATA retransmission timers are disabled. Flow ACKs
 and bounded disk queues still apply. Mode is reported before file payload starts.
