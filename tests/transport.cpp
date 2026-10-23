@@ -344,8 +344,31 @@ void file_workers() {
     check(exited.load());
     std::cout << "PASS disk-full/read-error propagation and bounded-queue cancellation\n";
 }
+// The table-driven CRC must equal the bitwise reflected CRC-32 for every length and alignment.
+void crc_equivalence() {
+    auto reference = [](uint32_t state, const uint8_t* p, size_t n) {
+        for (size_t i = 0; i < n; ++i) {
+            state ^= p[i];
+            for (int j = 0; j < 8; ++j)
+                state = (state >> 1) ^ (0xedb88320u & (0u - (state & 1u)));
+        }
+        return state;
+    };
+    std::mt19937 random(11);
+    Bytes data(4096);
+    for (auto& byte : data)
+        byte = uint8_t(random());
+    for (size_t offset = 0; offset < 8; ++offset)
+        for (size_t length = 0; length + offset <= 300; ++length)
+            check(crc(~0u, data.data() + offset, length) ==
+                  reference(~0u, data.data() + offset, length));
+    check(crc(~0u, data.data(), data.size()) == reference(~0u, data.data(), data.size()));
+    check(~crc(~0u, reinterpret_cast<const uint8_t*>("123456789"), 9) == 0xcbf43926u);
+    std::cout << "PASS table-driven CRC-32 matches bitwise reference and check value\n";
+}
 int main() {
     try {
+        crc_equivalence();
         accounting();
         malformed();
         receiving();

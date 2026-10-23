@@ -46,6 +46,7 @@ class Sender {
         Bytes data;
         unsigned attempts = 0;
         Time last = 0;
+        uint64_t latest = 0;
     };
     struct Attempt {
         uint64_t offset, bytes;
@@ -58,6 +59,10 @@ class Sender {
     std::map<uint64_t, Chunk> chunks_;
     std::map<uint64_t, Attempt> history_;
     std::set<uint64_t> flying_;
+    // Send scheduling without scanning the window: chunks whose latest attempt was declared lost,
+    // and the offset of the first never-sent chunk (never-sent chunks are always a suffix).
+    std::set<uint64_t> due_;
+    uint64_t fresh_ = 0;
     std::vector<Event> events_;
     Budget budget_;
     Time next_send_ = 0, progress_ = 0, probe_at_ = 200000, probe_backoff_ = 200000;
@@ -80,6 +85,19 @@ class Sender {
                 ++it;
         }
         require(history_.size() < HISTORY, "active packet history exhausted");
+    }
+    // The next chunk to send: the lowest-offset lost chunk, else the first never-sent chunk when it
+    // fits the receive limit. This matches choosing the lowest eligible offset in the window.
+    bool candidate(uint64_t& offset) const {
+        if (!due_.empty()) {
+            offset = *due_.begin();
+            return true;
+        }
+        if (fresh_ >= queued_)
+            return false;
+        offset = fresh_;
+        uint64_t size = std::min<uint64_t>(PAYLOAD, total_ - fresh_);
+        return fresh_ <= limit_ && size <= limit_ - fresh_;
     }
     Time timeout(const Chunk& chunk) const {
         return std::min<Time>(2000000, rto_ * (int64_t(1) << std::min<unsigned>(
@@ -138,32 +156,35 @@ class Sender {
     Time rto() const {
         return rto_;
     }
-    bool data_available(Time now) const {
-        for (const auto& entry : chunks_) {
-            const auto& chunk = entry.second;
-            if (reliable_link_ && chunk.attempts)
-                continue;
-            if (entry.first <= limit_ && chunk.data.size() <= limit_ - entry.first &&
-                (!chunk.attempts || now - chunk.last >= timeout(chunk)))
-                return true;
-        }
-        return false;
+    bool data_available(Time) const {
+        uint64_t offset;
+        return candidate(offset);
     }
     // Requirement: let the socket adapter honor submillisecond pacing without busy polling.
     Time wait(Time now) const {
         Time delay = 1000;
-        for (const auto& entry : chunks_) {
-            const auto& chunk = entry.second;
-            if (reliable_link_ && chunk.attempts)
-                continue;
-            if (entry.first > limit_ || chunk.data.size() > limit_ - entry.first ||
-                flight_ > budget_.flight_bytes ||
-                chunk.data.size() > budget_.flight_bytes - flight_)
-                continue;
-            Time ready = chunk.attempts ? chunk.last + timeout(chunk) : now;
-            delay = std::min(delay, std::max<Time>(0, std::max(ready, next_send_) - now));
+        uint64_t offset;
+        if (candidate(offset)) {
+            uint64_t size = chunks_.at(offset).data.size();
+            if (flight_ <= budget_.flight_bytes && size <= budget_.flight_bytes - flight_)
+                delay = std::min(delay, std::max<Time>(0, next_send_ - now));
         }
-        if (!reliable_link_ && !chunks_.empty())
+        if (reliable_link_)
+            return delay;
+        // Wake for the earliest loss deadline; later sends cannot expire before their sent + rto_.
+        Time earliest = std::numeric_limits<Time>::max();
+        for (uint64_t number : flying_) {
+            const auto& attempt = history_.at(number);
+            if (attempt.sent + rto_ >= earliest)
+                break;
+            auto chunk = chunks_.find(attempt.offset);
+            earliest = std::min(earliest, attempt.sent + (chunk == chunks_.end()
+                                                              ? rto_
+                                                              : timeout(chunk->second)));
+        }
+        if (earliest != std::numeric_limits<Time>::max())
+            delay = std::min(delay, std::max<Time>(0, earliest - now));
+        if (!chunks_.empty())
             delay = std::min(delay, std::max<Time>(0, probe_at_ - now));
         return delay;
     }
@@ -194,6 +215,9 @@ class Sender {
             if (attempt.flight && now - attempt.sent >= threshold) {
                 attempt.flight = false;
                 flight_ -= attempt.bytes;
+                // Only the chunk's newest attempt timing out makes it eligible for retransmission.
+                if (chunk != chunks_.end() && chunk->second.latest == number)
+                    due_.insert(attempt.offset);
                 event(
                     {Event::Lost, number, attempt.offset, attempt.bytes, attempt.sent, now, false});
                 it = flying_.erase(it);
@@ -205,33 +229,33 @@ class Sender {
         tick(now);
         if (now < next_send_)
             return false;
-        for (auto& entry : chunks_) {
-            auto& chunk = entry.second;
-            if (entry.first > limit_ || chunk.data.size() > limit_ - entry.first)
-                continue;
-            if (flight_ > budget_.flight_bytes ||
-                chunk.data.size() > budget_.flight_bytes - flight_)
-                continue;
-            if (chunk.attempts && (reliable_link_ || now - chunk.last < timeout(chunk)))
-                continue;
-            require(chunk.attempts < 11, "UDP retry limit exceeded");
-            require(next_ != UINT64_MAX, "packet number exhausted");
-            retire();
-            uint64_t number = next_++;
-            history_.emplace(number, Attempt{entry.first, chunk.data.size(), now, true, false});
-            flying_.insert(number);
-            flight_ += chunk.data.size();
-            sent_ += chunk.data.size();
-            ++chunk.attempts;
-            chunk.last = now;
-            // Keep the pacing schedule on its own timeline so loop overhead is not lost; allow at most
-            // four intervals of catch-up so an idle or slow loop cannot release a large burst.
-            next_send_ = std::max(next_send_, now - 4 * budget_.interval) + budget_.interval;
-            out = {number, entry.first, chunk.data};
-            event({Event::Sent, number, entry.first, chunk.data.size(), now, now, false});
-            return true;
-        }
-        return false;
+        uint64_t offset;
+        if (!candidate(offset))
+            return false;
+        auto& chunk = chunks_.at(offset);
+        if (flight_ > budget_.flight_bytes || chunk.data.size() > budget_.flight_bytes - flight_)
+            return false;
+        require(chunk.attempts < 11, "UDP retry limit exceeded");
+        require(next_ != UINT64_MAX, "packet number exhausted");
+        retire();
+        uint64_t number = next_++;
+        history_.emplace(number, Attempt{offset, chunk.data.size(), now, true, false});
+        flying_.insert(number);
+        flight_ += chunk.data.size();
+        sent_ += chunk.data.size();
+        if (chunk.attempts)
+            due_.erase(offset);
+        else
+            fresh_ += chunk.data.size();
+        ++chunk.attempts;
+        chunk.last = now;
+        chunk.latest = number;
+        // Keep the pacing schedule on its own timeline so loop overhead is not lost; allow at most
+        // four intervals of catch-up so an idle or slow loop cannot release a large burst.
+        next_send_ = std::max(next_send_, now - 4 * budget_.interval) + budget_.interval;
+        out = {number, offset, chunk.data};
+        event({Event::Sent, number, offset, chunk.data.size(), now, now, false});
+        return true;
     }
     // Requirement: validate the entire ACK before changing credit, delivery, or flight accounting.
     bool acknowledge(const Ack& ack, Time now) {
@@ -264,8 +288,10 @@ class Sender {
                     flying_.erase(it->first);
                 }
                 bool unique = chunks_.erase(attempt.offset) != 0;
-                if (unique)
+                if (unique) {
                     delivered_ += attempt.bytes;
+                    due_.erase(attempt.offset);
+                }
                 // Requirement: attempt numbers make RTT samples unambiguous even for retransmitted bytes.
                 double sample = double(now - attempt.sent);
                 if (sample > 0) {

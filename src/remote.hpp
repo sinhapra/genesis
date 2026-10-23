@@ -29,6 +29,11 @@ inline int udp_socket() {
     int fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0)
         return -1;
+    // Best effort: larger socket buffers absorb bursts on fast paths; the kernel caps the
+    // request at net.core.rmem_max/wmem_max and failure is harmless.
+    int buffer = 4 << 20;
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buffer, sizeof(buffer));
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buffer, sizeof(buffer));
     sockaddr_in local{};
     local.sin_family = AF_INET;
     if (bind(fd, reinterpret_cast<sockaddr*>(&local), sizeof(local)) != 0) {

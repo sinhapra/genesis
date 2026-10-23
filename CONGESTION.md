@@ -42,6 +42,9 @@ initial assumed RTT is 100 ms and initial pacing is 81,920 B/s. Telemetry report
 zero minimum RTT until a real sample exists. Absolute rate bounds are 16,384 to
 100,000,000 B/s; the payload window is bounded by `--window` (1-8,192 chunks,
 default 4,096).
+The congestion window is sized from the bandwidth estimate times max(minimum RTT, 1 ms),
+so sub-millisecond LAN paths tolerate OS scheduling and ACK batching instead of
+stalling on a window of a few packets; paths above 1 ms are unaffected.
 These operating limits and retry/idle timeouts restrict supported paths; the rate
 floor is unsuitable for paths below 16 KiB/s without further tuning/validation.
 

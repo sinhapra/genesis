@@ -114,6 +114,7 @@ class CongestionController {
   public:
     enum class Mode { Startup, Drain, ProbeBW, ProbeRTT };
     static constexpr double INITIAL_RATE = 81920, MIN_RATE = 16384, MAX_RATE = 100000000;
+    static constexpr Time WINDOW_RTT_FLOOR = 1000;
 
   private:
     DeliverySampler sampler_;
@@ -131,9 +132,12 @@ class CongestionController {
         require(now >= last_now_, "nonmonotonic controller clock");
         last_now_ = now;
     }
-    double bdp() const {
+    double bdp(Time rtt) const {
         return std::max<double>(minimum_, (estimate_ ? estimate_ : INITIAL_RATE) *
-                                              double(min_rtt_) / 1000000);
+                                              double(rtt) / 1000000);
+    }
+    double bdp() const {
+        return bdp(min_rtt_);
     }
     void enter(Mode mode, Time now) {
         mode_ = mode;
@@ -148,7 +152,11 @@ class CongestionController {
                                                : 1;
         double model = estimate_ ? estimate_ : INITIAL_RATE / 2;
         rate_ = std::clamp(std::min(model * gain, rate_cap_), MIN_RATE, MAX_RATE);
-        double target = mode_ == Mode::ProbeRTT ? double(minimum_) : 2 * bdp() + 2 * PAYLOAD;
+        // Size the window for at least WINDOW_RTT_FLOOR so sub-millisecond LANs tolerate OS
+        // scheduling and ACK batching instead of stalling on a window of a few packets.
+        double target = mode_ == Mode::ProbeRTT
+                            ? double(minimum_)
+                            : 2 * bdp(std::max(min_rtt_, WINDOW_RTT_FLOOR)) + 2 * PAYLOAD;
         uint64_t cap =
             uint64_t(std::clamp(std::min(target, flight_cap_), double(minimum_), double(maximum_)));
         cwnd_ = std::min(cwnd_, cap);

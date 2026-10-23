@@ -18,12 +18,33 @@ inline uint64_t get(const Bytes& b, size_t at, size_t count) {
         value = (value << 8) | b[at + i];
     return value;
 }
-inline uint32_t crc(uint32_t state, const uint8_t* p, size_t n) {
-    for (size_t i = 0; i < n; ++i) {
-        state ^= p[i];
-        for (int j = 0; j < 8; ++j)
-            state = (state >> 1) ^ (0xedb88320u & (0u - (state & 1u)));
+// CRC-32 (IEEE, reflected 0xedb88320) tables for slicing-by-8: same values as the bitwise form,
+// about an order of magnitude faster, which matters because every packet and file byte is checked.
+struct CrcTables {
+    uint32_t table[8][256];
+    constexpr CrcTables() : table() {
+        for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t value = i;
+            for (int j = 0; j < 8; ++j)
+                value = (value >> 1) ^ (0xedb88320u & (0u - (value & 1u)));
+            table[0][i] = value;
+        }
+        for (uint32_t i = 0; i < 256; ++i)
+            for (int k = 1; k < 8; ++k)
+                table[k][i] = (table[k - 1][i] >> 8) ^ table[0][table[k - 1][i] & 0xff];
     }
+};
+inline constexpr CrcTables CRC_TABLES{};
+inline uint32_t crc(uint32_t state, const uint8_t* p, size_t n) {
+    const auto& t = CRC_TABLES.table;
+    for (; n >= 8; p += 8, n -= 8) {
+        uint32_t low = state ^ (uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 |
+                                uint32_t(p[3]) << 24);
+        state = t[7][low & 0xff] ^ t[6][(low >> 8) & 0xff] ^ t[5][(low >> 16) & 0xff] ^
+                t[4][low >> 24] ^ t[3][p[4]] ^ t[2][p[5]] ^ t[1][p[6]] ^ t[0][p[7]];
+    }
+    while (n--)
+        state = (state >> 8) ^ t[0][(state ^ *p++) & 0xff];
     return state;
 }
 inline uint32_t wire_crc(const Bytes& b) {

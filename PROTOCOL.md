@@ -11,6 +11,8 @@ both adapters; legacy send/recv remain unauthenticated controlled-test commands.
 All integers are unsigned big endian. Header: magic `UFC3` (4 bytes), type (1),
 reserved zeros (3), session (8), stream offset (8), payload length (2), CRC32 (4).
 CRC covers the first 26 header bytes and payload. Maximum datagram is 1,062 bytes.
+CRC-32 is the standard reflected 0xedb88320 polynomial, computed table-driven
+(slicing-by-8); values are identical to the bitwise definition.
 Other versions are rejected by the decoder and silently discarded by endpoints;
 a sender times out when no compatible endpoint responds.
 
@@ -40,7 +42,11 @@ Sending window and receive capacity are configurable from 1 to 8,192 chunks.
 Pacing keeps its own schedule: each DATA send moves the next deadline one interval
 past the previous deadline, with at most four intervals of catch-up, so loop overhead
 does not lower the rate. The copy loop sends up to 16 due DATA packets and reads up
-to 64 datagrams per pass.
+to 64 datagrams per pass. The sender picks the next DATA without scanning its window:
+it keeps the set of chunks whose newest attempt was declared lost (resent first,
+lowest offset first) and the offset of the first never-sent chunk, and it wakes for
+the earliest loss deadline. UDP sockets request 4 MiB buffers, capped by the kernel's
+net.core.rmem_max/wmem_max.
 The receiver retains the most recent 32,768 accepted attempt numbers for duplicate
 checks and coalesces receipts into ranges as they arrive (at most 64 retained), so
 each ACK costs O(32), and sends the newest 32 ranges. Dropped older receipt history
