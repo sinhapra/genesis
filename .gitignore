@@ -9,3 +9,5 @@
 /ufcp-sanitize
 /tests/controller-*.csv
 __pycache__/
+/version.h
+/version.h.tmp

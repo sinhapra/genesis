@@ -7,7 +7,19 @@
 #include <cstdio>
 #include <iostream>
 
+#ifndef UFCP_VERSION
+#define UFCP_VERSION "unknown"
+#endif
+
 namespace ufcp {
+// INIT magic "UFS4": both hosts must run builds with the same setup protocol.
+constexpr uint32_t SESSION_MAGIC = 0x55465334;
+inline std::string version_text() {
+    std::string protocol;
+    for (int shift = 24; shift >= 0; shift -= 8)
+        protocol += char((SESSION_MAGIC >> shift) & 0xff);
+    return std::string("ufcp ") + UFCP_VERSION + " (setup protocol " + protocol + ")";
+}
 enum class RemoteMode : uint8_t { Auto, Udp, Ssh };
 struct TransferOptions {
     size_t window = 4096, receive_chunks = 4096;
@@ -383,7 +395,7 @@ constexpr uint8_t INIT_DOWNLOAD = 1, INIT_STATS = 2;
 inline void remote_helper(FrameChannel& channel) {
     diagnostic("helper waiting for INIT");
     auto init = channel.expect(Control::Init, 30000000).bytes;
-    require(init.size() >= 97 && get(init, 0, 4) == 0x55465334 && init[20] <= 2 &&
+    require(init.size() >= 97 && get(init, 0, 4) == SESSION_MAGIC && init[20] <= 2 &&
                 !(init[95] & ~(INIT_DOWNLOAD | INIT_STATS)),
             "incompatible SSH session setup");
     uint64_t total = get(init, 4, 8), session = get(init, 12, 8);
@@ -519,7 +531,8 @@ inline void remote_copy(const std::string& source, const std::string& target,
             "one of SOURCE or DEST must be [user@]host:path");
     const std::string& remote = download ? source : target;
     const std::string& local = download ? target : source;
-    diagnostic(std::string("role=client startup direction=") + (download ? "download" : "upload") +
+    diagnostic("role=client startup " + version_text());
+    diagnostic(std::string("client direction=") + (download ? "download" : "upload") +
                " mode=" + std::to_string(unsigned(options.mode)) +
                " window=" + std::to_string(options.window) +
                " receive-chunks=" + std::to_string(options.receive_chunks));
@@ -554,7 +567,7 @@ inline void remote_copy(const std::string& source, const std::string& target,
     ScopedFd udp(options.mode == RemoteMode::Ssh ? -1 : udp_socket());
     diagnostic("client local UDP port=" + std::to_string(udp.fd >= 0 ? udp_port(udp.fd) : 0));
     Bytes init(96 + remote_path.size());
-    put(init, 0, 0x55465334, 4);
+    put(init, 0, SESSION_MAGIC, 4);
     put(init, 4, total, 8);
     put(init, 12, session, 8);
     init[20] = uint8_t(options.mode);

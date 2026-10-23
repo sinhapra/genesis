@@ -238,11 +238,15 @@ void receiver(const char* ip, const char* port, const char* path, const Transfer
 int main(int argc, char** argv) {
     try {
         signal(SIGPIPE, SIG_IGN);
+        if (argc == 2 && (std::string(argv[1]) == "--version" || std::string(argv[1]) == "-V")) {
+            std::cout << version_text() << '\n';
+            return 0;
+        }
         if (argc >= 2 && std::string(argv[1]) == "--helper") {
             require(argc == 2 || (argc == 3 && std::string(argv[2]) == "--debug"),
                     "invalid helper arguments");
             debug_enabled = argc == 3;
-            diagnostic("role=helper startup");
+            diagnostic("role=helper startup " + version_text());
             return helper_main();
         }
         bool copy = argc >= 2 && std::string(argv[1]) == "copy";

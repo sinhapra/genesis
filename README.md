@@ -42,6 +42,7 @@ destination only after SHA-256 verification.
 | `--transport=auto\|udp\|ssh` | auto | Copy transport policy |
 | `--debug` | off | Copy diagnostics and SSH verbose output, including remote helper stderr |
 | `--cc=bbr-inspired\|fixed` | bbr-inspired | Userspace direct-UDP controller or test baseline |
+| `--version` | | Print the git commit the binary was built from (`-dirty` if built with uncommitted changes) and the setup protocol; also shown in `--debug` startup lines |
 | `--stats` | off | Live transfer statistics on stderr once per second, plus a summary |
 | `--window=N` | 4,096 chunks | Maximum sending window, 1-8,192 |
 | `--receive-chunks=N` | 4,096 chunks | Receiver capacity, 1-8,192 |

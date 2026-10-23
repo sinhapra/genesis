@@ -2,8 +2,14 @@ CXX ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Wpedantic -pthread
 LDLIBS ?= -lcrypto
 
-ufcp: src/ufcp.cpp src/transport.hpp src/wire.hpp src/file_io.hpp src/congestion.hpp src/crypto.hpp src/session_io.hpp src/remote.hpp
-	$(CXX) $(CXXFLAGS) $< -o $@ $(LDLIBS)
+# version.h records the git commit for `ufcp --version`; it is rewritten only when the commit changes.
+version.h: FORCE
+	@v=$$(git describe --always --dirty --abbrev=7 2>/dev/null || echo unknown); \
+	printf '#define UFCP_VERSION "%s"\n' "$$v" > version.h.tmp; \
+	cmp -s version.h.tmp version.h || mv version.h.tmp version.h; rm -f version.h.tmp
+
+ufcp: src/ufcp.cpp src/transport.hpp src/wire.hpp src/file_io.hpp src/congestion.hpp src/crypto.hpp src/session_io.hpp src/remote.hpp version.h
+	$(CXX) $(CXXFLAGS) -include version.h $< -o $@ $(LDLIBS)
 
 transport-test: tests/transport.cpp src/transport.hpp src/wire.hpp src/file_io.hpp src/crypto.hpp
 	$(CXX) $(CXXFLAGS) $< -o $@ $(LDLIBS)
@@ -37,4 +43,4 @@ WAN_DIRECTION ?= upload
 wan-test: ufcp
 	python3 tests/wan.py ./ufcp $(WAN_RTT) $(WAN_RATE) $(WAN_LOSS) $(WAN_SIZE) $(WAN_BUFFER) $(WAN_DIRECTION)
 
-.PHONY: test ssh-test netns-test wan-test
+.PHONY: test ssh-test netns-test wan-test FORCE
