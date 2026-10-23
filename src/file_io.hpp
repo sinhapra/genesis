@@ -76,6 +76,9 @@ class OutputFile {
         published_ = true;
     }
 };
+// Disk workers move data in blocks of up to 1 MiB: one read()/write() per block instead of one per
+// 1 KiB chunk, which matters on network or virtual filesystems with a high per-call cost.
+constexpr size_t DISK_BLOCK = 1 << 20;
 // Requirement: bounded producer/consumer queues keep blocking disk operations outside the network loop.
 class FileQueue {
     std::mutex mutex_;
@@ -85,7 +88,8 @@ class FileQueue {
     std::exception_ptr error_;
 
   public:
-    static constexpr size_t CAPACITY = 16;
+    // About one disk block of 1 KiB chunks, so workers can batch disk calls.
+    static constexpr size_t CAPACITY = 1024;
     bool push(Bytes bytes) {
         std::unique_lock<std::mutex> lock(mutex_);
         changed_.wait(lock, [&] { return canceled_ || closed_ || queue_.size() < CAPACITY; });
@@ -154,23 +158,28 @@ class FileReader {
               try {
                   Sha256 hash;
                   uint64_t remaining = uint64_t(original.st_size);
+                  Bytes block;
                   while (remaining) {
-                      Bytes bytes(size_t(std::min<uint64_t>(remaining, PAYLOAD)));
+                      block.resize(size_t(std::min<uint64_t>(remaining, DISK_BLOCK)));
                       size_t read_bytes = 0;
-                      while (read_bytes < bytes.size()) {
-                          auto n = read(fd, bytes.data() + read_bytes, bytes.size() - read_bytes);
+                      while (read_bytes < block.size()) {
+                          auto n = read(fd, block.data() + read_bytes, block.size() - read_bytes);
                           if (n < 0 && errno == EINTR)
                               continue;
                           require(n > 0, "source read failed or source changed");
                           read_bytes += size_t(n);
                       }
-                      digest_ = crc(digest_, bytes.data(), bytes.size());
-                      remaining -= bytes.size();
-                      hash.update(bytes);
-                      if (delay_ms)
-                          std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-                      if (!queue_.push(std::move(bytes)))
-                          return;
+                      remaining -= block.size();
+                      digest_ = crc(digest_, block.data(), block.size());
+                      hash.update(block);
+                      // Split the block into network chunks; the queue bound still applies per chunk.
+                      for (size_t at = 0; at < block.size(); at += PAYLOAD) {
+                          size_t size = std::min(PAYLOAD, block.size() - at);
+                          if (delay_ms)
+                              std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+                          if (!queue_.push(Bytes(block.begin() + at, block.begin() + at + size)))
+                              return;
+                      }
                   }
                   struct stat current {};
                   require(fstat(fd, &current) == 0 && same_source(original, current),
@@ -217,21 +226,29 @@ class FileWriter {
         : thread_([this, fd, delay_ms] {
               try {
                   Sha256 hash;
-                  Bytes bytes;
+                  Bytes bytes, block;
                   while (queue_.pop(bytes, true)) {
+                      // Coalesce chunks that are already queued (never waiting for more) into one write.
+                      block.assign(bytes.begin(), bytes.end());
+                      size_t chunks = 1;
+                      while (block.size() < DISK_BLOCK && queue_.pop(bytes, false)) {
+                          block.insert(block.end(), bytes.begin(), bytes.end());
+                          ++chunks;
+                      }
                       if (delay_ms)
-                          std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+                          std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms * chunks));
                       size_t written = 0;
-                      while (written < bytes.size()) {
-                          auto n = write(fd, bytes.data() + written, bytes.size() - written);
+                      while (written < block.size()) {
+                          auto n = write(fd, block.data() + written, block.size() - written);
                           if (n < 0 && errno == EINTR)
                               continue;
                           require(n > 0, "destination write failed");
                           written += size_t(n);
                       }
-                      digest_ = crc(digest_, bytes.data(), bytes.size());
-                      hash.update(bytes);
-                      written_.fetch_add(bytes.size());
+                      digest_ = crc(digest_, block.data(), block.size());
+                      hash.update(block);
+                      // Credit is released only for bytes that have actually been written.
+                      written_.fetch_add(block.size());
                   }
                   hash_ = hash.finish();
                   done_.store(true);

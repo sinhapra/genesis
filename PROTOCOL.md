@@ -35,14 +35,16 @@ peer delay. Maximum ACK payload is 526 bytes.
 
 ## Bounds and retention
 
-Defaults: a 4,096-chunk sending cap, 4,096 receive chunks (4 MiB), 16 chunks per file queue,
+Defaults: a 4,096-chunk sending cap, 4,096 receive chunks (4 MiB), 1,024 chunks per file queue,
 adaptive DATA pacing, a 5 ms ACK timer and an ACK every two accepted DATA packets.
 The fixed test baseline (`--cc=fixed`) uses 1 ms DATA pacing.
 Sending window and receive capacity are configurable from 1 to 8,192 chunks.
 Pacing keeps its own schedule: each DATA send moves the next deadline one interval
 past the previous deadline, with at most four intervals of catch-up, so loop overhead
 does not lower the rate. The copy loop sends up to 16 due DATA packets and reads up
-to 64 datagrams per pass. The sender picks the next DATA without scanning its window:
+to 64 datagrams per pass. Disk workers read and write in blocks of up to 1 MiB
+(the writer coalesces only chunks already queued), so each 1 KiB chunk does not
+cost its own read() or write() system call. The sender picks the next DATA without scanning its window:
 it keeps the set of chunks whose newest attempt was declared lost (resent first,
 lowest offset first) and the offset of the first never-sent chunk, and it wakes for
 the earliest loss deadline. UDP sockets request 4 MiB buffers, capped by the kernel's
