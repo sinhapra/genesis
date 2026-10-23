@@ -383,7 +383,7 @@ constexpr uint8_t INIT_DOWNLOAD = 1, INIT_STATS = 2;
 inline void remote_helper(FrameChannel& channel) {
     diagnostic("helper waiting for INIT");
     auto init = channel.expect(Control::Init, 30000000).bytes;
-    require(init.size() >= 97 && get(init, 0, 4) == 0x55465333 && init[20] <= 2 &&
+    require(init.size() >= 97 && get(init, 0, 4) == 0x55465334 && init[20] <= 2 &&
                 !(init[95] & ~(INIT_DOWNLOAD | INIT_STATS)),
             "incompatible SSH session setup");
     uint64_t total = get(init, 4, 8), session = get(init, 12, 8);
@@ -425,11 +425,14 @@ inline void remote_helper(FrameChannel& channel) {
     diagnostic("helper READY UDP port=" + std::to_string(get(ready, 8, 2)));
     channel.send(Control::Ready, ready);
     // Requirement: open stateful firewalls/NATs on this side by sending first; the client's probes then arrive as replies.
+    // Punching starts only after PROBING says the client has sent its first probe, so the
+    // client's own NAT already holds the mapping and an early punch cannot claim its port.
     sockaddr_in punch{};
-    bool punching = udp.fd >= 0 && client_port && sender_address(punch);
+    bool can_punch = udp.fd >= 0 && client_port && sender_address(punch);
+    bool punching = false, probing = false;
     punch.sin_port = htons(client_port);
-    diagnostic(punching ? "helper punching toward client " + endpoint(punch)
-                        : "helper not punching (no client UDP port or SSH_CONNECTION IPv4)");
+    diagnostic(can_punch ? "helper will punch toward client " + endpoint(punch)
+                         : "helper not punching (no client UDP port or SSH_CONNECTION IPv4)");
     Time punch_at = 0, deadline = session_now() + 15000000;
     bool selected = false, direct = false, peer_known = false;
     sockaddr_in peer{};
@@ -438,7 +441,13 @@ inline void remote_helper(FrameChannel& channel) {
         auto now = session_now();
         channel.flush();
         Frame frame;
-        if (channel.next(frame)) {
+        bool received = channel.next(frame);
+        if (received && frame.type == Control::Probing) {
+            require(frame.bytes.empty() && !probing, "invalid PROBING message");
+            probing = true;
+            punching = can_punch;
+            diagnostic("helper received PROBING; punching=" + std::to_string(punching));
+        } else if (received) {
             require(frame.type == Control::Select && frame.bytes.size() == 1 &&
                         frame.bytes[0] >= 1 && frame.bytes[0] <= 2,
                     "invalid transport selection");
@@ -545,7 +554,7 @@ inline void remote_copy(const std::string& source, const std::string& target,
     ScopedFd udp(options.mode == RemoteMode::Ssh ? -1 : udp_socket());
     diagnostic("client local UDP port=" + std::to_string(udp.fd >= 0 ? udp_port(udp.fd) : 0));
     Bytes init(96 + remote_path.size());
-    put(init, 0, 0x55465333, 4);
+    put(init, 0, 0x55465334, 4);
     put(init, 4, total, 8);
     put(init, 12, session, 8);
     init[20] = uint8_t(options.mode);
@@ -583,6 +592,7 @@ inline void remote_copy(const std::string& source, const std::string& target,
             auto nonce = random_bytes(16);
             std::copy(nonce.begin(), nonce.end(), challenge.begin());
             Time until = session_now() + 1200000, next = 0;
+            bool announced = false;
             while (session_now() < until && !direct) {
                 auto now = session_now();
                 if (now >= next) {
@@ -590,14 +600,22 @@ inline void remote_copy(const std::string& source, const std::string& target,
                         raw_send(udp.fd, peer, encrypted_record(outgoing, 1, challenge), true);
                     diagnostic("client UDP probe sent=" + std::to_string(sent));
                     next = now + 200000;
+                    // After the first probe our NAT mapping exists; now the helper may punch.
+                    if (!announced) {
+                        channel.send(Control::Probing);
+                        announced = true;
+                    }
                 }
+                channel.flush();
                 Bytes sealed, plain;
                 sockaddr_in from{};
                 if (raw_receive(udp.fd, sealed, from)) {
                     bool expected_peer = same_peer(peer, from);
                     bool authenticated = expected_peer && incoming.open(sealed, plain);
                     if (authenticated && plain[0] == 3) {
+                        // The helper's side is open now; probe again without waiting.
                         diagnostic("client received helper punch from=" + endpoint(from));
+                        next = now;
                         continue;
                     }
                     direct = authenticated && plain.size() == PacketCipher::MAX_PLAIN &&

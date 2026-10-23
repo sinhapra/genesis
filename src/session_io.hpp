@@ -54,7 +54,8 @@ enum class Control : uint8_t {
     Finish,
     Complete,
     Error,
-    Close
+    Close,
+    Probing
 };
 struct Frame {
     Control type;
@@ -114,7 +115,7 @@ class FrameChannel {
                 require(size && size <= MAX_FRAME, "invalid SSH frame length");
                 if (input_bytes_.size() >= size + 4) {
                     require(input_bytes_[4] >= uint8_t(Control::Init) &&
-                                input_bytes_[4] <= uint8_t(Control::Close),
+                                input_bytes_[4] <= uint8_t(Control::Probing),
                             "invalid SSH frame type");
                     frame = {Control(input_bytes_[4]),
                              Bytes(input_bytes_.begin() + 5, input_bytes_.begin() + 4 + size)};

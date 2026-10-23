@@ -13,6 +13,14 @@ import zlib
 binary = str(pathlib.Path(sys.argv[1]).resolve())
 
 
+def leftovers(path):
+    """Temporary outputs for path: hidden .NAME.XXXXXXXX.part files, or a legacy NAME.part."""
+    path = pathlib.Path(path)
+    prefix = '.' + path.name[:200] + '.'
+    found = [f for f in path.parent.iterdir() if f.name.startswith(prefix) and f.name.endswith('.part')]
+    return found + [p for p in [path.with_name(path.name + '.part')] if p.exists()]
+
+
 def free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.bind(('127.0.0.1', 0))
@@ -162,7 +170,7 @@ def transfer(root, name, data, mode=None, sender_options=(), receiver_options=()
         out, err = receiver.communicate(timeout=10)
         assert receiver.returncode == 0, (out, err)
         assert target.read_bytes() == data
-        assert not pathlib.Path(str(target) + '.part').exists()
+        assert not leftovers(target)
         if mode == 'credit':
             assert relay.probes >= 2, 'credit recovery did not exercise probes'
         print('PASS', name, flush=True)
@@ -193,7 +201,7 @@ def source_mutation(root):
         assert sender.returncode != 0 and 'source changed' in err, (out, err)
         out, err = receiver.communicate(timeout=20)
         assert receiver.returncode != 0 and not target.exists(), (out, err)
-        assert not pathlib.Path(str(target) + '.part').exists()
+        assert not leftovers(target)
         print('PASS source mutation and incomplete-output cleanup', flush=True)
     finally:
         for process in (sender, receiver):

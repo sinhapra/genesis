@@ -10,6 +10,14 @@ import tempfile
 import time
 
 binary = str(pathlib.Path(sys.argv[1]).resolve())
+
+
+def leftovers(path):
+    """Temporary outputs for path: hidden .NAME.XXXXXXXX.part files, or a legacy NAME.part."""
+    path = pathlib.Path(path)
+    prefix = '.' + path.name[:200] + '.'
+    found = [f for f in path.parent.iterdir() if f.name.startswith(prefix) and f.name.endswith('.part')]
+    return found + [p for p in [path.with_name(path.name + '.part')] if p.exists()]
 sshd = os.environ.get('UFCP_TEST_SSHD') or shutil.which('sshd')
 assert sshd, 'set UFCP_TEST_SSHD to an available sshd executable'
 
@@ -78,7 +86,7 @@ LogLevel ERROR
             result = run(base + ['ufcp-fixture:' + str(target)] + options + extra)
             assert result.returncode == 0, (result.stdout, result.stderr)
             assert 'Transport: ' + expected in result.stdout and target.read_bytes() == source.read_bytes()
-            assert not pathlib.Path(str(target) + '.part').exists()
+            assert not leftovers(target)
             print('PASS real OpenSSH', name, flush=True)
             if name.startswith('strict-udp'):
                 assert 'Controller: bbr-inspired' in result.stdout
@@ -108,7 +116,7 @@ LogLevel ERROR
         assert 'client UDP negotiation complete reachable=0' in result.stderr
         assert 'helper READY UDP port=' in result.stderr
         assert 'SSH exit code=' in result.stderr or 'cleanup: terminating SSH' in result.stderr
-        assert not pathlib.Path(str(target) + '.part').exists()
+        assert not leftovers(target)
         print('PASS real OpenSSH strict UDP rejects unavailable path without fallback', flush=True)
         result = run(base + ['ufcp-fixture:' + str(root / 'missing-helper.out'),
                              '--ssh-config=' + str(root / 'config'),

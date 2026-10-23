@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <fcntl.h>
 
 namespace ufcp {
@@ -19,32 +20,60 @@ namespace ufcp {
 class OutputFile {
     std::string destination_, temporary_;
     int fd_ = -1;
+    bool published_ = false;
+    // A unique hidden name beside the destination, ".NAME.XXXXXXXX.part". Exclusive creation with a
+    // random suffix means files left by crashed runs and concurrent copies never block a new copy.
+    static std::string temporary_name(const std::string& destination) {
+        size_t slash = destination.rfind('/');
+        std::string directory = slash == std::string::npos ? "" : destination.substr(0, slash + 1);
+        std::string name = slash == std::string::npos ? destination : destination.substr(slash + 1);
+        static const char digits[] = "abcdefghijklmnopqrstuvwxyz0123456789";
+        std::string suffix;
+        for (uint8_t byte : random_bytes(8))
+            suffix += digits[byte % 36];
+        return directory + "." + name.substr(0, 200) + "." + suffix + ".part";
+    }
 
   public:
-    explicit OutputFile(const std::string& destination)
-        : destination_(destination), temporary_(destination + ".part") {
+    explicit OutputFile(const std::string& destination) : destination_(destination) {
         struct stat existing {};
         bool replace = stat(destination_.c_str(), &existing) == 0;
         require(!replace || !S_ISDIR(existing.st_mode), "destination is a directory");
-        require(!replace || S_ISREG(existing.st_mode), "destination exists and is not a regular file");
-        fd_ = open(temporary_.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-        require(fd_ >= 0, "cannot create temporary output");
+        require(!replace || S_ISREG(existing.st_mode),
+                "destination exists and is not a regular file");
+        for (int attempt = 0; fd_ < 0 && attempt < 8; ++attempt) {
+            temporary_ = temporary_name(destination_);
+            fd_ = open(temporary_.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+            if (fd_ < 0 && errno != EEXIST)
+                break;
+        }
+        if (fd_ < 0)
+            throw std::runtime_error("cannot create temporary output " + temporary_ + ": " +
+                                     std::strerror(errno));
         // Like scp, an overwritten file keeps its permission bits; new files stay owner-only.
         if (replace)
-            require(fchmod(fd_, existing.st_mode & 07777) == 0, "cannot copy destination permissions");
+            require(fchmod(fd_, existing.st_mode & 07777) == 0,
+                    "cannot copy destination permissions");
     }
     ~OutputFile() {
-        close(fd_);
-        unlink(temporary_.c_str());
+        if (fd_ >= 0)
+            close(fd_);
+        if (!published_)
+            unlink(temporary_.c_str());
     }
     OutputFile(const OutputFile&) = delete;
     OutputFile& operator=(const OutputFile&) = delete;
     int fd() const {
         return fd_;
     }
+    const std::string& temporary() const {
+        return temporary_;
+    }
     void publish() {
         // rename atomically replaces any existing destination, so readers never see a partial file.
-        require(rename(temporary_.c_str(), destination_.c_str()) == 0, "cannot finalize destination");
+        require(rename(temporary_.c_str(), destination_.c_str()) == 0,
+                "cannot finalize destination");
+        published_ = true;
     }
 };
 // Requirement: bounded producer/consumer queues keep blocking disk operations outside the network loop.

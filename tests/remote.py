@@ -13,17 +13,26 @@ import zlib
 binary = str(pathlib.Path(sys.argv[1]).resolve())
 
 
+def leftovers(path):
+    """Temporary outputs for path: hidden .NAME.XXXXXXXX.part files, or a legacy NAME.part."""
+    path = pathlib.Path(path)
+    prefix = '.' + path.name[:200] + '.'
+    found = [f for f in path.parent.iterdir() if f.name.startswith(prefix) and f.name.endswith('.part')]
+    return found + [p for p in [path.with_name(path.name + '.part')] if p.exists()]
+
+
 def invoke(root, name, mode='auto', options=(), data=None, environment=None):
     source = root / (name + '.in')
     target = root / (name + " ' ; $(printf injection) .out")
     data = os.urandom(65539) if data is None else data
     source.write_bytes(data)
+    before = set(leftovers(target))
     args = [binary, 'copy', str(source), '127.0.0.1:' + str(target),
             '--ssh-program=' + str(root / 'ssh-fixture'), '--remote-program=' + binary,
             '--transport=' + mode, *options]
     result = subprocess.run(args, capture_output=True, text=True, timeout=30, env=environment)
     assert result.returncode == 0, (name, result.returncode, result.stdout, result.stderr)
-    assert target.read_bytes() == data and not pathlib.Path(str(target) + '.part').exists()
+    assert target.read_bytes() == data and set(leftovers(target)) == before
     assert 'verified with SHA-256' in result.stdout
     if mode == 'ssh' or '--udp-address=127.0.0.2' in options:
         assert 'Transport: SSH/TCP' in result.stdout and 'Controller: bbr-inspired' not in result.stdout
@@ -38,12 +47,13 @@ def download(root, name, mode='auto', options=(), data=None, environment=None):
     local = root / (name + '.download')
     data = os.urandom(65539) if data is None else data
     remote.write_bytes(data)
+    before = set(leftovers(local))
     args = [binary, 'copy', '127.0.0.1:' + str(remote), str(local),
             '--ssh-program=' + str(root / 'ssh-fixture'), '--remote-program=' + binary,
             '--transport=' + mode, *options]
     result = subprocess.run(args, capture_output=True, text=True, timeout=30, env=environment)
     assert result.returncode == 0, (name, result.returncode, result.stdout, result.stderr)
-    assert local.read_bytes() == data and not pathlib.Path(str(local) + '.part').exists()
+    assert local.read_bytes() == data and set(leftovers(local)) == before
     assert 'received, verified with SHA-256' in result.stdout
     tunneled = mode == 'ssh' or '--udp-address=127.0.0.2' in options
     assert ('Transport: SSH/TCP' if tunneled else 'Transport: direct UDP') in result.stdout, result.stdout
@@ -72,7 +82,7 @@ def raw_helper(root, name, bad_hash=False, drop_after_publish=False):
     target = root / (name + '.out')
     payload = b'hello authenticated session'
     path = str(target).encode()
-    init = struct.pack('!IQQBHHH', 0x55465333, len(payload), 123, 2, 32, 64, 0) + os.urandom(64) + struct.pack('!HHB', len(path), 0, 0) + path
+    init = struct.pack('!IQQBHHH', 0x55465334, len(payload), 123, 2, 32, 64, 0) + os.urandom(64) + struct.pack('!HHB', len(path), 0, 0) + path
     process = subprocess.Popen([binary, '--helper'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         process.stdin.write(frame(1, init)); process.stdin.flush()
@@ -82,7 +92,7 @@ def raw_helper(root, name, bad_hash=False, drop_after_publish=False):
         if not bad_hash and not drop_after_publish:
             process.stdin.close(); process.stdin = None
             process.communicate(timeout=5)
-            assert process.returncode != 0 and not target.exists() and not pathlib.Path(str(target) + '.part').exists()
+            assert process.returncode != 0 and not target.exists() and not leftovers(target)
             print('PASS helper disconnect cleanup', flush=True)
             return
         body = struct.pack('!Q', 1) + payload
@@ -102,7 +112,7 @@ def raw_helper(root, name, bad_hash=False, drop_after_publish=False):
             assert outcome[0] == 7 and target.read_bytes() == payload
         process.stdin.close(); process.stdin = None
         process.communicate(timeout=5)
-        assert not pathlib.Path(str(target) + '.part').exists()
+        assert not leftovers(target)
         assert target.exists() == (not bad_hash)
         print('PASS', 'bad SHA-256 rejection' if bad_hash else 'published output survives lost close confirmation', flush=True)
     finally:
@@ -231,12 +241,27 @@ while True:
     _, local = download(root, 'overwrite')
     assert stat.S_IMODE(local.stat().st_mode) == 0o640
     print('PASS download overwrite keeps local permissions', flush=True)
+    # Temporary files left by crashed runs (old fixed name or new random name) must not block copies.
+    for name, mode in (('stale-download', 'download'), ('stale-upload', 'upload')):
+        target = root / (name + ('.download' if mode == 'download' else " ' ; $(printf injection) .out"))
+        stale = [pathlib.Path(str(target) + '.part'), target.with_name('.' + target.name + '.stale123.part')]
+        for path in stale:
+            path.write_bytes(b'left by a crashed run')
+        if mode == 'download':
+            download(root, name)
+        else:
+            invoke(root, name, 'ssh')
+        assert set(leftovers(target)) == set(stale), leftovers(target)
+        for path in stale:
+            assert path.read_bytes() == b'left by a crashed run'
+            path.unlink()
+    print('PASS stale temporary files never block a new copy', flush=True)
     local = root / 'missing.download'
     result = subprocess.run([binary, 'copy', '127.0.0.1:' + str(root / 'no-such-file'), str(local),
                              '--ssh-program=' + str(root / 'ssh-fixture'), '--remote-program=' + binary],
                             capture_output=True, text=True, timeout=10)
     assert result.returncode != 0 and 'remote source must be a readable regular file' in result.stderr
-    assert not local.exists() and not pathlib.Path(str(local) + '.part').exists()
+    assert not local.exists() and not leftovers(local)
     print('PASS download of missing remote file fails cleanly', flush=True)
     for args, message in ((['a:x', 'b:y'], 'two remote hosts'), (['x', 'y'], 'must be [user@]host:path')):
         result = subprocess.run([binary, 'copy', *args], capture_output=True, text=True, timeout=10)
@@ -249,10 +274,10 @@ while True:
     result = subprocess.run(args, capture_output=True, text=True, timeout=10)
     assert result.returncode != 0 and 'strict UDP mode' in result.stderr and not target.exists()
     for i in range(200):
-        if not pathlib.Path(str(target) + '.part').exists():
+        if not leftovers(target):
             break
         time.sleep(0.01)
-    assert not pathlib.Path(str(target) + '.part').exists()
+    assert not leftovers(target)
     print('PASS strict UDP failure without fallback', flush=True)
     raw_helper(root, 'disconnect')
     raw_helper(root, 'bad-hash', bad_hash=True)
@@ -263,7 +288,7 @@ while True:
     environment = dict(os.environ, UFCP_TEST_DROP_COMPLETE='1')
     result = subprocess.run(args, capture_output=True, text=True, timeout=10, env=environment)
     assert result.returncode != 0 and 'completion unconfirmed' in result.stderr
-    assert target.read_bytes() == source.read_bytes() and not pathlib.Path(str(target) + '.part').exists()
+    assert target.read_bytes() == source.read_bytes() and not leftovers(target)
     print('PASS sender reports unconfirmed when COMPLETE is lost after publication', flush=True)
     for bad in (bytes(4), struct.pack('!I', 8193), frame(255), frame(1, b'bad init')):
         result = subprocess.run([binary, '--helper'], input=bad, capture_output=True, timeout=3)

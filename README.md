@@ -33,8 +33,9 @@ with `--remote-program=/path/to/ufcp`. Existing SSH authentication/host-key poli
 is honored. `--ssh-config=FILE` selects an SSH config. No privileged tunnel or
 forwarding configuration is needed. Source must be regular and unchanged. Like scp,
 an existing destination file is replaced and keeps its permission bits; a directory
-is refused. The replacement is atomic: the file is written as `DEST.part` and renamed
-over the destination only after SHA-256 verification.
+is refused. The replacement is atomic: the file is written to a hidden temporary
+file beside it (`.DEST.XXXXXXXX.part`, unique per copy) and renamed over the
+destination only after SHA-256 verification.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -143,8 +144,9 @@ installed SSH services, account keys and firewall/router settings are untouched.
 
 Daemon mode, progress/ETA and explicit cancellation UX, resume, IPv6, PMTU discovery,
 automatic mid-transfer failover and production system validation remain. Output
-publication is not power-loss durable. Normal failures remove incomplete `.part`;
-crashes may leave it, and it is never silently reused. Kernel filesystem I/O may
+publication is not power-loss durable. Normal failures remove their temporary file;
+a crash or kill may leave a hidden `.DEST.XXXXXXXX.part` behind, which is never
+reused and never blocks later copies (the random name is unique per copy). Kernel filesystem I/O may
 delay worker shutdown. SHA-256 and metadata checks do not replace source snapshots.
 
 

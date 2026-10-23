@@ -69,11 +69,11 @@ sockets are closed when SSH/TCP is selected.
 
 SSH frames contain big-endian length (4), type (1), and payload. Length includes
 type and is bounded to 1-8,192. Types: INIT=1, READY=2, SELECT=3, SELECTED=4,
-PACKET=5, FINISH=6, COMPLETE=7, ERROR=8, CLOSE=9. Parsing supports fragmentation
+PACKET=5, FINISH=6, COMPLETE=7, ERROR=8, CLOSE=9, PROBING=10. Parsing supports fragmentation
 and coalescing; output is bounded to 128 KiB plus one partially written frame,
 with control-space reservation.
 
-INIT payload fields: UFS3 magic (4), stream size (8; zero for downloads), session ID
+INIT payload fields: UFS4 magic (4), stream size (8; zero for downloads), session ID
 (8), requested mode (1; auto=0/udp=1/ssh=2), window chunks (2), receive chunks (2),
 worker delay ms (2), independent directional keys (64), remote path length (2),
 client UDP port (2; zero when unavailable), flags (1; download=1, stats=2), remote
@@ -84,10 +84,13 @@ for downloads (8), then the UDP port (2; zero when unavailable). SELECT/SELECTED
 validated UFC3 DATA or ACK record. FINISH/COMPLETE contain stream size (8) and
 SHA-256 (32). ERROR contains a bounded reason; CLOSE has no payload.
 
-Before the client probes, the helper punches: every 100 ms until SELECT it sends
-an encrypted punch record to the client UDP port at the client address that
-sshd reports in SSH_CONNECTION (the client's public address when it is behind
-NAT). Because the helper sends first, stateful firewalls and NAT routers on the
+The client sends its first probe and then PROBING (no payload) over SSH. From
+then until SELECT the helper punches: every 100 ms it sends an encrypted punch
+record to the client UDP port at the client address that sshd reports in
+SSH_CONNECTION (the client's public address when it is behind NAT). Waiting for
+PROBING guarantees the client's own NAT already maps that port, so an early punch
+cannot claim it and force a different external port. A received punch makes the
+client probe again at once. Because the helper sends before its side sees probes, stateful firewalls and NAT routers on the
 helper side treat the client's probes as replies, so no inbound firewall rule,
 port forward or adapter change is needed. This works when both sides may send
 outbound UDP and NAT keeps the client's port (as ufw, firewalld, Windows
@@ -138,8 +141,9 @@ after local verification and publication. CLOSE lets the helper exit; the client
 checks SSH exit status. Late flow-control ACKs are harmless.
 
 ERROR immediately reports setup/disk/integrity failures over SSH. EOF or normal
-failure removes incomplete .part output; crashes may leave it, and it is never
-silently reused. Published output survives later disconnects. Missing COMPLETE
+failure removes the incomplete temporary file, a hidden `.DEST.XXXXXXXX.part` with
+a random suffix created exclusively per copy; crashes may leave one, which is never
+reused and never blocks later copies. Published output survives later disconnects. Missing COMPLETE
 after FINISH reports completion unconfirmed. An error after validated COMPLETE
 reports a confirmed destination with an SSH shutdown error, not uncertain data.
 
